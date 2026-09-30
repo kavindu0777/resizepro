@@ -64,13 +64,6 @@ function Navbar() {
 
         </nav>
 
-        <Link
-          to="/video-resizer"
-          className="get-started-btn"
-        >
-          Get Started
-        </Link>
-
       </div>
     </header>
   );

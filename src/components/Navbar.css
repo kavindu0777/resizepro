@@ -13,12 +13,14 @@
   margin: 0 auto;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px 28px;
 }
 
 .logo {
   display: flex;
   align-items: center;
+  justify-self: start;
   gap: 10px;
   flex: 0 0 auto;
   color: #151a24;
@@ -49,8 +51,8 @@
 .nav-links {
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex: 1 1 auto;
+  justify-content: flex-end;
+  margin-left: auto;
   gap: 32px;
   min-width: 0;
 }
@@ -83,27 +85,9 @@
   background: #ffc400;
 }
 
-.get-started-btn {
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding: 12px 22px;
-  border-radius: 10px;
-  background: #ffc400;
-  color: #151a24;
-  font-size: 15px;
-  font-weight: 800;
-  text-decoration: none;
-  white-space: nowrap;
-  transition: 0.2s ease;
-}
-
-.get-started-btn:hover {
-  background: #f5b800;
-  transform: translateY(-1px);
-}
-
 @media (max-width: 1180px) {
   .navbar-container {
+    display: flex;
     flex-wrap: wrap;
     padding: 10px 0 0;
   }
@@ -125,10 +109,6 @@
   .nav-link {
     height: 48px;
   }
-
-  .get-started-btn {
-    margin-left: auto;
-  }
 }
 
 @media (max-width: 500px) {
@@ -148,10 +128,5 @@
 
   .nav-link {
     font-size: 14px;
-  }
-
-  .get-started-btn {
-    padding: 10px 14px;
-    font-size: 13px;
   }
 }
