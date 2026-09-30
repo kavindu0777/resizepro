@@ -88,7 +88,10 @@ body.hide-site-footer .footer {
   width: 600px;
   aspect-ratio: 1 / 1;
   display: flex;
-  flex-direction: column;/* =========================================================
+  flex-direction: column;
+}
+
+/* =========================================================
    GLOBAL
 ========================================================= */
 
@@ -2142,19 +2145,6 @@ body.lock-video-editor .editor-layout {
   .results-row-actions {
     grid-area: actions;
   }
-}
-  align-items: center;
-  justify-content: center;
-  padding: 32px;
-  overflow: hidden;
-  border: 2px dashed #e4d16c;
-  border-radius: 22px;
-  background: #fffef7;
-  cursor: pointer;
-  transition:
-    border-color 0.2s ease,
-    background 0.2s ease,
-    transform 0.2s ease;
 }
 
 .video-drop-zone:hover,
