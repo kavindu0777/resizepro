@@ -1,0 +1,222 @@
+/* =========================
+   FOOTER
+========================= */
+
+.footer {
+  width: 100%;
+
+  min-height: 155px;
+
+  background: #ffffff;
+
+  border-top: 1px solid #eeeeee;
+}
+
+.footer-container {
+  width: 100%;
+
+  max-width: 1320px;
+
+  min-height: 155px;
+
+  margin: 0 auto;
+
+  padding: 30px 20px;
+
+  display: grid;
+
+  grid-template-columns:
+    2fr 1fr 1fr 1fr 1fr;
+
+  gap: 50px;
+}
+
+
+/* =========================
+   FOOTER BRAND
+========================= */
+
+.footer-brand {
+  display: flex;
+
+  flex-direction: column;
+
+  align-items: flex-start;
+}
+
+.footer-logo {
+  display: flex;
+
+  align-items: center;
+
+  gap: 10px;
+
+  margin-bottom: 15px;
+
+  text-decoration: none;
+}
+
+.footer-logo-icon {
+  width: 34px;
+
+  height: 34px;
+
+  background: #ffc400;
+
+  color: #ffffff;
+
+  border-radius: 7px;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  font-size: 23px;
+
+  font-weight: 800;
+}
+
+.footer-logo-text {
+  color: #151a24;
+
+  font-size: 23px;
+
+  font-weight: 800;
+}
+
+.footer-logo-text span {
+  color: #f5b800;
+}
+
+.footer-brand p {
+  font-size: 14px;
+
+  color: #50555f;
+}
+
+
+/* =========================
+   FOOTER COLUMNS
+========================= */
+
+.footer-column {
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 9px;
+}
+
+.footer-column h3 {
+  margin-bottom: 5px;
+
+  font-size: 15px;
+
+  font-weight: 700;
+
+  color: #151a24;
+}
+
+.footer-column a {
+  color: #555a64;
+
+  font-size: 14px;
+
+  text-decoration: none;
+
+  transition: 0.2s ease;
+}
+
+.footer-column a:hover {
+  color: #f5b800;
+}
+
+
+/* =========================
+   SOCIAL ICONS
+========================= */
+
+.social-icons {
+  display: flex;
+
+  gap: 12px;
+
+  margin-top: 4px;
+}
+
+.social-icons a {
+  width: 37px;
+
+  height: 37px;
+
+  border-radius: 50%;
+
+  background: #f1f2f3;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  color: #1d222b;
+
+  font-size: 14px;
+
+  font-weight: 700;
+
+  transition: 0.2s ease;
+}
+
+.social-icons a:hover {
+  background: #ffc400;
+
+  color: #151a24;
+}
+
+
+/* =========================
+   TABLET
+========================= */
+
+@media (max-width: 1100px) {
+
+  .footer-container {
+    grid-template-columns: repeat(3, 1fr);
+
+    gap: 35px;
+  }
+
+}
+
+
+/* =========================
+   MOBILE
+========================= */
+
+@media (max-width: 800px) {
+
+  .footer-container {
+    grid-template-columns: 1fr 1fr;
+
+    gap: 35px;
+  }
+
+}
+
+
+/* =========================
+   SMALL MOBILE
+========================= */
+
+@media (max-width: 500px) {
+
+  .footer-container {
+    grid-template-columns: 1fr;
+
+    gap: 30px;
+  }
+
+}
