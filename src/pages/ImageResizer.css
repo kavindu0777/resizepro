@@ -1046,7 +1046,27 @@ body.lock-image-editor .image-editor-section {
 
 .image-results-head,
 .image-results-row {
-  grid-template-columns: 28px minmax(0, 1.6fr) 90px 80px minmax(90px, 1fr) 52px;
+  grid-template-columns: minmax(220px, 1.8fr) 110px 90px 110px 52px;
+}
+
+.image-results-head {
+  color: #2a2a2a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.image-results-row,
+.image-results-file strong,
+.image-results-row em,
+.image-results-done,
+.image-results-error,
+.image-results-progress {
+  font-weight: 600;
+}
+
+.image-results-file strong {
+  color: #151515;
+  font-size: 14px;
 }
 
 .image-check {

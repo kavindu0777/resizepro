@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./ImageResizer.css";
 
 const ASPECTS = [
@@ -10,7 +10,7 @@ const ASPECTS = [
   { id: "standard", label: "4:3", hint: "1440 × 1080", width: 1440, height: 1080 },
 ];
 
-const SIZE_PRESETS = [{ label: "Story", width: 1080, height: 1920 }];
+const SIZE_PRESETS = [{ label: "Story", width: 1620, height: 2880 }];
 
 const FEATURES = [
   {
@@ -313,7 +313,6 @@ function ImageResizer() {
   const [mode, setMode] = useState("size");
   const [width, setWidth] = useState(1080);
   const [height, setHeight] = useState(1080);
-  const [lockRatio, setLockRatio] = useState(true);
   const [percent, setPercent] = useState(100);
   const [aspect, setAspect] = useState("original");
   const [rotation, setRotation] = useState(0);
@@ -341,19 +340,6 @@ function ImageResizer() {
   }, [editorOpen]);
 
   const reference = images[0];
-  const referenceSize = useMemo(() => {
-    if (!reference) {
-      return { width: 1, height: 1 };
-    }
-
-    if (rotation % 180 !== 0) {
-      return { width: reference.height, height: reference.width };
-    }
-
-    return { width: reference.width, height: reference.height };
-  }, [reference, rotation]);
-
-  const referenceRatio = referenceSize.width / referenceSize.height;
 
   function targetFor(image) {
     const swapped = rotation % 180 !== 0;
@@ -379,33 +365,21 @@ function ImageResizer() {
     }
 
     const nextWidth = clamp(width || baseWidth);
-    const nextHeight = lockRatio
-      ? clamp(nextWidth / (baseWidth / baseHeight))
-      : clamp(height || baseHeight);
+    const nextHeight = clamp(height || baseHeight);
 
     return {
       width: nextWidth,
       height: nextHeight,
-      fit: lockRatio ? "contain" : "fill",
+      fit: "fill",
     };
   }
 
   function updateWidth(value) {
-    const next = Math.max(1, Number(value) || 1);
-    setWidth(next);
-
-    if (lockRatio) {
-      setHeight(Math.max(1, Math.round(next / referenceRatio)));
-    }
+    setWidth(Math.max(1, Number(value) || 1));
   }
 
   function updateHeight(value) {
-    const next = Math.max(1, Number(value) || 1);
-    setHeight(next);
-
-    if (lockRatio) {
-      setWidth(Math.max(1, Math.round(next * referenceRatio)));
-    }
+    setHeight(Math.max(1, Number(value) || 1));
   }
 
   async function addImages(fileList) {
@@ -510,7 +484,6 @@ function ImageResizer() {
 
   function resetSettings() {
     setMode("size");
-    setLockRatio(true);
     setPercent(100);
     setAspect("original");
     setRotation(0);
@@ -813,20 +786,6 @@ function ImageResizer() {
                         </span>
                       </label>
                     </div>
-                    <label className="image-lock">
-                      <input
-                        type="checkbox"
-                        checked={lockRatio}
-                        onChange={(event) => {
-                          setLockRatio(event.target.checked);
-
-                          if (event.target.checked) {
-                            setHeight(Math.max(1, Math.round(width / referenceRatio)));
-                          }
-                        }}
-                      />
-                      Lock aspect ratio
-                    </label>
                     <p className="image-mini-label">Quick presets</p>
                     <div className="image-preset-row">
                       <button
@@ -843,7 +802,6 @@ function ImageResizer() {
                             return;
                           }
 
-                          setLockRatio(true);
                           setWidth(reference.width);
                           setHeight(reference.height);
                         }}
@@ -860,7 +818,6 @@ function ImageResizer() {
                               : ""
                           }
                           onClick={() => {
-                            setLockRatio(false);
                             setWidth(preset.width);
                             setHeight(preset.height);
                           }}
