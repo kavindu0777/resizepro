@@ -1,59 +1,42 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import "./VideoResizer.css";
 
-import { processVideo } from "../utils/videoProcessor";
+import ResultsPanel from "../components/ResultsPanel";
+
+import {
+  MAX_SPEED,
+  MIN_SPEED,
+  getOutputSize,
+  isCancelled,
+  processVideo,
+  stopVideoProcessing,
+} from "../utils/videoProcessor";
+import {
+  createZip,
+  downloadBlob,
+  downloadMany,
+  downloadUrl,
+  makeId,
+} from "../utils/files";
+
+// ffmpeg.wasm keeps the input and the output in browser memory.
+// Much above this, tabs start crashing, especially on phones.
+const MAX_FILE_SIZE = 300 * 1024 * 1024;
+const MAX_FILE_LABEL = "300 MB";
+
+const VIDEO_EXTENSIONS = /\.(mp4|m4v|mov|avi|webm|mkv|mpe?g|3gp|wmv|flv|ogv)$/i;
 
 const ASPECT_RATIOS = [
-  {
-    id: "original",
-    name: "Original",
-    label: "Original",
-    ratio: null,
-    size: "Original video",
-  },
-  {
-    id: "square",
-    name: "Square",
-    label: "1:1",
-    ratio: 1,
-    size: "1080 × 1080",
-  },
-  {
-    id: "story",
-    name: "Story",
-    label: "9:16",
-    ratio: 9 / 16,
-    size: "1080 × 1920",
-  },
-  {
-    id: "portrait",
-    name: "Portrait",
-    label: "4:5",
-    ratio: 4 / 5,
-    size: "1080 × 1350",
-  },
-  {
-    id: "landscape",
-    name: "Landscape",
-    label: "16:9",
-    ratio: 16 / 9,
-    size: "1920 × 1080",
-  },
-  {
-    id: "standard",
-    name: "Standard",
-    label: "4:3",
-    ratio: 4 / 3,
-    size: "1440 × 1080",
-  },
+  { id: "original", name: "Original", label: "Original", ratio: null, size: "Original video" },
+  { id: "square", name: "Square", label: "1:1", ratio: 1, size: "1080 × 1080" },
+  { id: "story", name: "Story", label: "9:16", ratio: 9 / 16, size: "1080 × 1920" },
+  { id: "portrait", name: "Portrait", label: "4:5", ratio: 4 / 5, size: "1080 × 1350" },
+  { id: "landscape", name: "Landscape", label: "16:9", ratio: 16 / 9, size: "1920 × 1080" },
+  { id: "standard", name: "Standard", label: "4:3", ratio: 4 / 3, size: "1440 × 1080" },
 ];
 
-const SPEEDS = [0.25, 0.5, 0.75, 1, 2];
+const SPEEDS = [0.25, 0.5, 1, 2, 4];
 
 const FEATURES = [
   {
@@ -68,7 +51,7 @@ const FEATURES = [
   },
   {
     title: "Playback Speed",
-    text: "Slow a clip down to 0.25× or speed it up to 2×. The same speed is used for every video in the batch.",
+    text: "Drag the bar or type any speed from 0.25× to 4×. The same speed is used for every video in the batch.",
     icon: "speed",
   },
   {
@@ -78,7 +61,7 @@ const FEATURES = [
   },
   {
     title: "Format and Quality",
-    text: "Save as MP4, WEBM, or MOV. Choose High, Medium, or Low so the file stays a useful size.",
+    text: "Save as MP4, WEBM, or MOV. Original quality is the default; High, Medium, or Low make smaller files.",
     icon: "refresh",
   },
   {
@@ -104,15 +87,6 @@ function FeatureIcon({ name }) {
         <path d="M16 16h4v-4" />
         <path d="M4 8l6 6" />
         <path d="M20 16l-6-6" />
-      </svg>
-    );
-  }
-
-  if (name === "crop") {
-    return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M7 3v14h14" />
-        <path d="M3 7h14v14" />
       </svg>
     );
   }
@@ -152,12 +126,11 @@ function FeatureIcon({ name }) {
 }
 
 function UiIcon({ name }) {
-  if (name === "more") {
+  if (name === "remove") {
     return (
       <svg className="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
-        <circle cx="10" cy="4.5" r="1.25" />
-        <circle cx="10" cy="10" r="1.25" />
-        <circle cx="10" cy="15.5" r="1.25" />
+        <path d="M5 5l10 10" />
+        <path d="M15 5 5 15" />
       </svg>
     );
   }
@@ -171,25 +144,26 @@ function UiIcon({ name }) {
   );
 }
 
-function useElementWidth(query, narrow, wide) {
-  const [width, setWidth] = useState(wide);
+function useMediaValue(query, matchValue, otherValue) {
+  const [value, setValue] = useState(otherValue);
 
   useEffect(() => {
     const media = window.matchMedia(query);
-    const apply = () => setWidth(media.matches ? narrow : wide);
+    const apply = () => setValue(media.matches ? matchValue : otherValue);
 
     apply();
     media.addEventListener("change", apply);
 
     return () => media.removeEventListener("change", apply);
-  }, [query, narrow, wide]);
+  }, [query, matchValue, otherValue]);
 
-  return width;
+  return value;
 }
 
-function useVirtualRange(count, itemSize, gap, axis) {
+// Only the cards near the visible area are rendered, so 100+ videos stay fast.
+function useVirtualRange(count, itemSize, gap) {
   const [node, setNode] = useState(null);
-  const [range, setRange] = useState({ start: 0, end: 0 });
+  const [range, setRange] = useState({ start: 0, end: 4 });
 
   useEffect(() => {
     if (!node) {
@@ -199,19 +173,14 @@ function useVirtualRange(count, itemSize, gap, axis) {
     let frame = 0;
 
     const measure = () => {
-      const scroll = axis === "x" ? node.scrollLeft : node.scrollTop;
-      const view = Math.max(
-        axis === "x" ? node.clientWidth : node.clientHeight,
-        itemSize
-      );
+      const scroll = node.scrollLeft;
+      const view = Math.max(node.clientWidth, itemSize);
       const stride = itemSize + gap;
       const start = Math.max(0, Math.floor(scroll / stride) - 2);
       const end = Math.min(count, Math.ceil((scroll + view) / stride) + 2);
 
       setRange((current) =>
-        current.start === start && current.end === end
-          ? current
-          : { start, end }
+        current.start === start && current.end === end ? current : { start, end }
       );
     };
 
@@ -229,20 +198,55 @@ function useVirtualRange(count, itemSize, gap, axis) {
       node.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
     };
-  }, [node, count, itemSize, gap, axis]);
-
-  const stride = itemSize + gap;
+  }, [node, count, itemSize, gap]);
 
   return {
     setNode,
-    start: range.start,
-    end: Math.max(range.end, Math.min(count, range.start + 1)),
-    offset: range.start * stride,
+    start: Math.min(range.start, count),
+    end: Math.min(count, Math.max(range.end, range.start + 1)),
     total: count === 0 ? 0 : count * itemSize + Math.max(0, count - 1) * gap,
   };
 }
 
-const MAX_FILE_SIZE = 500 * 1024 * 1024;
+// Type any speed, e.g. 1.3. Applied when the value is valid.
+function SpeedInput({ value, disabled, onCommit }) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const number = Number(draft);
+
+    if (draft !== "" && Number.isFinite(number) && number > 0) {
+      onCommit(number);
+    } else {
+      setDraft(String(value));
+    }
+  };
+
+  return (
+    <input
+      className="speed-number"
+      type="number"
+      inputMode="decimal"
+      min={MIN_SPEED}
+      max={MAX_SPEED}
+      step="0.05"
+      value={draft}
+      disabled={disabled}
+      aria-label="Speed"
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
 
 function formatFileSize(bytes) {
   if (!bytes) {
@@ -258,25 +262,6 @@ function formatFileSize(bytes) {
   return `${mb.toFixed(1)} MB`;
 }
 
-function previewSizeLabel(aspectRatio, video) {
-  const selected = ASPECT_RATIOS.find((item) => item.id === aspectRatio);
-
-  if (selected && selected.id !== "original") {
-    return selected.size;
-  }
-
-  if (video.width && video.height) {
-    return `${video.width} × ${video.height}`;
-  }
-
-  return formatFileSize(video.size);
-}
-
-function previewDuration(video, speed) {
-  const rate = Number(speed) || 1;
-  return formatDuration((Number(video.duration) || 0) / rate);
-}
-
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) {
     return "00:00";
@@ -289,9 +274,28 @@ function formatDuration(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function previewDuration(video, speed) {
+  return formatDuration((Number(video.duration) || 0) / (Number(speed) || 1));
+}
+
+// Uses the same function as the encoder, so the label matches the file.
+function outputSizeLabel(video, aspectRatio, quality) {
+  if (video.status === "loading") {
+    return "Reading video...";
+  }
+
+  const size = getOutputSize(video, aspectRatio, quality);
+
+  if (size.known) {
+    return `${size.width} × ${size.height}`;
+  }
+
+  return "Size unknown · keeps the source shape";
+}
+
 function createVideoObject(file) {
   return {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id: makeId(),
     file,
     name: file.name,
     size: file.size,
@@ -308,33 +312,23 @@ function createVideoObject(file) {
     outputMimeType: "",
     outputWidth: 0,
     outputHeight: 0,
+    outputKey: "",
     error: "",
   };
 }
 
-function getVideoRatio(video) {
-  if (
-    video?.width &&
-    video?.height &&
-    video.width > 0 &&
-    video.height > 0
-  ) {
-    return video.width / video.height;
-  }
-
-  return 16 / 9;
-}
-
 function getPreviewRatio(aspectRatio, video) {
-  const selected = ASPECT_RATIOS.find(
-    (item) => item.id === aspectRatio
-  );
+  const selected = ASPECT_RATIOS.find((item) => item.id === aspectRatio);
 
   if (selected?.ratio) {
     return selected.ratio;
   }
 
-  return getVideoRatio(video);
+  if (video?.width > 0 && video?.height > 0) {
+    return video.width / video.height;
+  }
+
+  return 16 / 9;
 }
 
 function fileTypeLabel(video) {
@@ -356,111 +350,6 @@ function fileTypeLabel(video) {
   return "MP4";
 }
 
-function uniqueFileName(name, used) {
-  if (!used.has(name)) {
-    used.add(name);
-    return name;
-  }
-
-  const dot = name.lastIndexOf(".");
-  const base = dot > 0 ? name.slice(0, dot) : name;
-  const extension = dot > 0 ? name.slice(dot) : "";
-  let index = 2;
-  let next = `${base}-${index}${extension}`;
-
-  while (used.has(next)) {
-    index += 1;
-    next = `${base}-${index}${extension}`;
-  }
-
-  used.add(next);
-  return next;
-}
-
-function crc32(bytes) {
-  let crc = 0xffffffff;
-
-  for (let index = 0; index < bytes.length; index += 1) {
-    crc ^= bytes[index];
-
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
-
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-async function createZip(files) {
-  const encoder = new TextEncoder();
-  const parts = [];
-  const centralParts = [];
-  let offset = 0;
-
-  for (const file of files) {
-    const data = new Uint8Array(await file.blob.arrayBuffer());
-    const nameBytes = encoder.encode(file.name);
-    const checksum = crc32(data);
-    const local = new Uint8Array(30 + nameBytes.length);
-    const localView = new DataView(local.buffer);
-
-    localView.setUint32(0, 0x04034b50, true);
-    localView.setUint16(4, 20, true);
-    localView.setUint16(8, 0, true);
-    localView.setUint32(14, checksum, true);
-    localView.setUint32(18, data.length, true);
-    localView.setUint32(22, data.length, true);
-    localView.setUint16(26, nameBytes.length, true);
-    local.set(nameBytes, 30);
-
-    const central = new Uint8Array(46 + nameBytes.length);
-    const centralView = new DataView(central.buffer);
-
-    centralView.setUint32(0, 0x02014b50, true);
-    centralView.setUint16(4, 20, true);
-    centralView.setUint16(6, 20, true);
-    centralView.setUint32(16, checksum, true);
-    centralView.setUint32(20, data.length, true);
-    centralView.setUint32(24, data.length, true);
-    centralView.setUint16(28, nameBytes.length, true);
-    centralView.setUint32(42, offset, true);
-    central.set(nameBytes, 46);
-
-    parts.push(local, data);
-    centralParts.push(central);
-    offset += local.length + data.length;
-  }
-
-  const centralSize = centralParts.reduce(
-    (sum, part) => sum + part.length,
-    0
-  );
-  const end = new Uint8Array(22);
-  const endView = new DataView(end.buffer);
-
-  endView.setUint32(0, 0x06054b50, true);
-  endView.setUint16(8, files.length, true);
-  endView.setUint16(10, files.length, true);
-  endView.setUint32(12, centralSize, true);
-  endView.setUint32(16, offset, true);
-
-  return new Blob([...parts, ...centralParts, end], {
-    type: "application/zip",
-  });
-}
-
-function downloadBlob(blob, name) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-
-  link.href = url;
-  link.download = name;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-}
-
 function revokeVideoUrls(video) {
   if (video?.url) {
     URL.revokeObjectURL(video.url);
@@ -471,17 +360,43 @@ function revokeVideoUrls(video) {
   }
 }
 
+function validateVideoFile(file) {
+  if (!file) {
+    return { valid: false, message: "Invalid video file." };
+  }
+
+  // Some systems give .mkv/.avi an empty or generic type, so check the name too.
+  const genericType = !file.type || file.type === "application/octet-stream";
+  const looksLikeVideo =
+    file.type.startsWith("video/") ||
+    (genericType && VIDEO_EXTENSIONS.test(file.name));
+
+  if (!looksLikeVideo) {
+    return { valid: false, message: `${file.name} is not a video file.` };
+  }
+
+  if (file.size > MAX_FILE_SIZE) {
+    return {
+      valid: false,
+      message: `${file.name} is larger than ${MAX_FILE_LABEL}.`,
+    };
+  }
+
+  return { valid: true, message: "" };
+}
+
 function loadVideoDetails(videoObject) {
   return new Promise((resolve) => {
     const video = document.createElement("video");
+    let settled = false;
+    let timer = 0;
 
     video.preload = "metadata";
     video.muted = true;
     video.playsInline = true;
 
-    let settled = false;
-
     const cleanup = () => {
+      window.clearTimeout(timer);
       video.onloadedmetadata = null;
       video.onseeked = null;
       video.onerror = null;
@@ -500,28 +415,19 @@ function loadVideoDetails(videoObject) {
       const width = partial.width ?? (video.videoWidth || 0);
       const height = partial.height ?? (video.videoHeight || 0);
       const duration = partial.duration ?? (Number(video.duration) || 0);
-      let thumbnailUrl = partial.thumbnailUrl || "";
+      let thumbnailUrl = "";
 
-      if (!thumbnailUrl && width && height) {
+      if (width && height && video.readyState >= 2) {
         try {
           const canvas = document.createElement("canvas");
-          const fit = Math.min(1, 720 / width);
-
+          const fit = Math.min(1, 720 / Math.max(width, height));
           canvas.width = Math.max(2, Math.round(width * fit));
           canvas.height = Math.max(2, Math.round(height * fit));
-
           const context = canvas.getContext("2d");
 
           if (context) {
-            context.drawImage(
-              video,
-              0,
-              0,
-              canvas.width,
-              canvas.height
-            );
-
-            thumbnailUrl = canvas.toDataURL("image/jpeg", 0.88);
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            thumbnailUrl = canvas.toDataURL("image/jpeg", 0.85);
           }
         } catch (error) {
           console.warn("Thumbnail generation failed:", error);
@@ -529,11 +435,10 @@ function loadVideoDetails(videoObject) {
       }
 
       cleanup();
-
       resolve({
         width,
         height,
-        duration,
+        duration: Number.isFinite(duration) ? duration : 0,
         thumbnailUrl,
       });
     };
@@ -554,23 +459,13 @@ function loadVideoDetails(videoObject) {
       }
     };
 
-    video.onseeked = () => {
-      settle();
-    };
+    video.onseeked = () => settle();
 
-    video.onerror = () => {
-      settle({
-        width: 0,
-        height: 0,
-        duration: 0,
-        thumbnailUrl: "",
-      });
-    };
+    // AVI and HEVC files often cannot be read by the browser.
+    // They can still be converted; ffmpeg keeps their original shape.
+    video.onerror = () => settle({ width: 0, height: 0, duration: 0 });
 
-    window.setTimeout(() => {
-      settle();
-    }, 5000);
-
+    timer = window.setTimeout(() => settle(), 5000);
     video.src = videoObject.url;
   });
 }
@@ -582,33 +477,47 @@ function VideoResizer() {
   const [speed, setSpeed] = useState(1);
   const [muted, setMuted] = useState(false);
   const [outputFormat, setOutputFormat] = useState("MP4");
-  const [quality, setQuality] = useState("High");
+  const [quality, setQuality] = useState("Original");
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
   const [processingMessage, setProcessingMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [activeVideoId, setActiveVideoId] = useState(null);
   const [playingVideoId, setPlayingVideoId] = useState(null);
   const [uploadMessage, setUploadMessage] = useState("");
   const [screen, setScreen] = useState("editor");
   const [selectedIds, setSelectedIds] = useState([]);
   const [zipping, setZipping] = useState(false);
-  const [openMenuId, setOpenMenuId] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [resultsError, setResultsError] = useState("");
 
-  const cardWidth = useElementWidth("(max-width: 600px)", 280, 304);
-  const videoWindow = useVirtualRange(videos.length, cardWidth, 16, "x");
+  const cardWidth = useMediaValue("(max-width: 600px)", 280, 304);
+  const videoWindow = useVirtualRange(videos.length, cardWidth, 16);
   const fileInputRef = useRef(null);
   const videoRefs = useRef({});
   const videosRef = useRef([]);
   const jobVersionRef = useRef({});
+  const abortRef = useRef(null);
 
-  const completedCount = videos.filter(
-    (video) => video.status === "done"
-  ).length;
-
-  const isReading = videos.some(
-    (video) => video.status === "loading"
+  // Every output remembers the settings it was made with.
+  // When the settings change, those videos are processed again.
+  const settingsKey = useMemo(
+    () =>
+      JSON.stringify({ aspectRatio, scale, speed, muted, outputFormat, quality }),
+    [aspectRatio, scale, speed, muted, outputFormat, quality]
   );
+
+  const isCurrent = (video) =>
+    video.status === "done" &&
+    Boolean(video.outputUrl) &&
+    video.outputKey === settingsKey;
+
+  const currentCount = videos.filter(isCurrent).length;
+  const staleCount = videos.filter(
+    (video) => video.status === "done" && video.outputKey !== settingsKey
+  ).length;
+  const isReading = videos.some((video) => video.status === "loading");
+  const allCurrent = videos.length > 0 && currentCount === videos.length;
 
   useEffect(() => {
     videosRef.current = videos;
@@ -627,30 +536,41 @@ function VideoResizer() {
   }, [screen, videos.length]);
 
   useEffect(() => {
-    if (!openMenuId) {
-      return undefined;
-    }
-
-    const closeMenu = () => setOpenMenuId(null);
-
-    window.addEventListener("click", closeMenu);
-
-    return () => window.removeEventListener("click", closeMenu);
-  }, [openMenuId]);
-
-  useEffect(() => {
     Object.values(videoRefs.current).forEach((video) => {
-      if (!video) {
-        return;
+      if (video) {
+        video.playbackRate = Number(speed);
+        video.muted = Boolean(muted);
       }
-
-      video.playbackRate = Number(speed);
-      video.muted = Boolean(muted);
     });
   }, [speed, muted]);
 
+  // On phones the editor is long, so the "Process all" button sits far down
+  // the page. Without this, the results page opened at that same scroll
+  // position and looked like it had jumped to the bottom.
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  }, [screen]);
+
+  // Warn before closing the tab in the middle of an export.
+  useEffect(() => {
+    if (!isProcessing) {
+      return undefined;
+    }
+
+    const warn = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [isProcessing]);
+
+  // Leaving the page stops ffmpeg and frees memory.
   useEffect(() => {
     return () => {
+      abortRef.current?.abort();
+      stopVideoProcessing();
       videosRef.current.forEach(revokeVideoUrls);
     };
   }, []);
@@ -663,36 +583,13 @@ function VideoResizer() {
     fileInputRef.current?.click();
   };
 
-  const validateVideoFile = (file) => {
-    if (!file) {
-      return {
-        valid: false,
-        message: "Invalid video file.",
-      };
-    }
-
-    if (!file.type.startsWith("video/")) {
-      return {
-        valid: false,
-        message: `${file.name} is not a video file.`,
-      };
-    }
-
-    if (file.size > MAX_FILE_SIZE) {
-      return {
-        valid: false,
-        message: `${file.name} is larger than 500 MB.`,
-      };
-    }
-
-    return {
-      valid: true,
-      message: "",
-    };
-  };
-
   const addVideos = async (fileList) => {
-    if (isProcessing || isUploading) {
+    if (isProcessing) {
+      return;
+    }
+
+    if (isUploading) {
+      setUploadMessage("Please wait until the current videos finish loading.");
       return;
     }
 
@@ -715,11 +612,7 @@ function VideoResizer() {
       }
     });
 
-    if (rejected.length) {
-      setUploadMessage(rejected.join(" "));
-    } else {
-      setUploadMessage("");
-    }
+    setUploadMessage(rejected.join(" "));
 
     if (!validFiles.length) {
       return;
@@ -737,28 +630,12 @@ function VideoResizer() {
 
     try {
       for (const videoObject of newVideos) {
-        let nextVideo = {
-          ...videoObject,
-          status: "ready",
-        };
-
-        try {
-          const details = await loadVideoDetails(videoObject);
-
-          nextVideo = {
-            ...videoObject,
-            ...details,
-            status: "ready",
-          };
-        } catch (error) {
-          console.error("Video preparation error:", error);
-        }
+        const details = await loadVideoDetails(videoObject);
+        const nextVideo = { ...videoObject, ...details, status: "ready" };
 
         if (alreadyHasVideos) {
           setVideos((previous) =>
-            previous.map((item) =>
-              item.id === videoObject.id ? nextVideo : item
-            )
+            previous.map((item) => (item.id === videoObject.id ? nextVideo : item))
           );
         } else {
           prepared.push(nextVideo);
@@ -774,8 +651,10 @@ function VideoResizer() {
   };
 
   const handleFileInput = async (event) => {
-    await addVideos(event.target.files);
-    event.target.value = "";
+    const input = event.target;
+    const files = Array.from(input.files || []);
+    input.value = "";
+    await addVideos(files);
   };
 
   const handleDragOver = (event) => {
@@ -800,11 +679,9 @@ function VideoResizer() {
     event.preventDefault();
     setIsDragging(false);
 
-    if (isProcessing) {
-      return;
+    if (!isProcessing) {
+      await addVideos(event.dataTransfer.files);
     }
-
-    await addVideos(event.dataTransfer.files);
   };
 
   const removeVideo = (id) => {
@@ -812,7 +689,7 @@ function VideoResizer() {
       return;
     }
 
-    const video = videos.find((item) => item.id === id);
+    const video = videosRef.current.find((item) => item.id === id);
 
     if (!video) {
       return;
@@ -820,26 +697,42 @@ function VideoResizer() {
 
     revokeVideoUrls(video);
     delete videoRefs.current[id];
+    delete jobVersionRef.current[id];
 
-    setVideos((previous) =>
-      previous.filter((item) => item.id !== id)
-    );
+    const next = videosRef.current.filter((item) => item.id !== id);
+    videosRef.current = next;
+    setVideos(next);
+    setSelectedIds((previous) => previous.filter((item) => item !== id));
 
-    if (playingVideoId === id) {
+    if (activeVideoId === id) {
+      setActiveVideoId(null);
       setPlayingVideoId(null);
+    }
+
+    // Removing the last result used to leave an empty results page
+    // with no way to upload again.
+    if (!next.length) {
+      setScreen("editor");
+      setProcessingMessage("");
     }
   };
 
   const clearVideos = () => {
-    if (isProcessing) {
+    if (isProcessing || isUploading) {
       return;
     }
 
-    videos.forEach(revokeVideoUrls);
+    videosRef.current.forEach(revokeVideoUrls);
+    videosRef.current = [];
     videoRefs.current = {};
+    jobVersionRef.current = {};
     setVideos([]);
+    setActiveVideoId(null);
     setPlayingVideoId(null);
     setUploadMessage("");
+    setSelectedIds([]);
+    setProcessingMessage("");
+    setResultsError("");
   };
 
   const playVideo = async (id, event) => {
@@ -851,17 +744,11 @@ function VideoResizer() {
       return;
     }
 
-    Object.entries(videoRefs.current).forEach(
-      ([videoId, element]) => {
-        if (
-          String(videoId) !== String(id) &&
-          element &&
-          !element.paused
-        ) {
-          element.pause();
-        }
+    Object.entries(videoRefs.current).forEach(([videoId, element]) => {
+      if (videoId !== String(id) && element && !element.paused) {
+        element.pause();
       }
-    );
+    });
 
     video.muted = Boolean(muted);
     video.playbackRate = Number(speed);
@@ -871,54 +758,60 @@ function VideoResizer() {
     }
 
     try {
+      setActiveVideoId(id);
       await video.play();
       setPlayingVideoId(id);
     } catch (error) {
       console.error("Video play failed:", error);
       setPlayingVideoId(null);
+      setUploadMessage(
+        "This browser cannot preview that video, but it can still be converted."
+      );
     }
+  };
+
+  const pausePlayback = () => {
+    Object.values(videoRefs.current).forEach((video) => {
+      if (video && !video.paused) {
+        video.pause();
+      }
+    });
+
+    setPlayingVideoId(null);
+    setActiveVideoId(null);
   };
 
   const handleScaleChange = (value) => {
-    if (isProcessing) {
-      return;
-    }
-
     const number = Number(value);
 
-    if (!Number.isFinite(number)) {
-      return;
+    if (!isProcessing && Number.isFinite(number)) {
+      setScale(Math.min(200, Math.max(50, number)));
     }
-
-    setScale(Math.min(200, Math.max(50, number)));
   };
 
+  // Any speed between MIN_SPEED and MAX_SPEED, rounded to 2 decimals.
   const handleSpeedChange = (value) => {
-    if (isProcessing) {
-      return;
-    }
-
     const number = Number(value);
 
-    if (!Number.isFinite(number)) {
-      return;
+    if (!isProcessing && Number.isFinite(number) && number > 0) {
+      const clamped = Math.min(MAX_SPEED, Math.max(MIN_SPEED, number));
+      setSpeed(Math.round(clamped * 100) / 100);
     }
-
-    setSpeed(Math.min(2, Math.max(0.25, number)));
   };
 
-  const runVideoProcess = async (videoId, hooks = {}) => {
+  /** @returns {"done" | "error" | "cancelled" | "skipped"} */
+  const runVideoProcess = async (videoId, { onProgress, signal }) => {
     const video = videosRef.current.find((item) => item.id === videoId);
 
     if (!video) {
-      return false;
+      return "skipped";
     }
 
     const version = (jobVersionRef.current[videoId] || 0) + 1;
     jobVersionRef.current[videoId] = version;
+    const stillCurrent = () => jobVersionRef.current[videoId] === version;
 
-    const isCurrent = () => jobVersionRef.current[videoId] === version;
-
+    const key = settingsKey;
     const settings = {
       aspectRatio,
       scale: Number(scale),
@@ -932,342 +825,242 @@ function VideoResizer() {
       URL.revokeObjectURL(video.outputUrl);
     }
 
-    setVideos((previous) => {
-      if (!isCurrent()) {
-        return previous;
-      }
+    const updateVideo = (patch) => {
+      setVideos((previous) => {
+        const next = previous.map((item) =>
+          item.id === videoId ? { ...item, ...patch } : item
+        );
+        videosRef.current = next;
+        return next;
+      });
+    };
 
-      return previous.map((item) =>
-        item.id === videoId
-          ? {
-              ...item,
-              status: "processing",
-              progress: 0,
-              outputUrl: "",
-              outputName: "",
-              outputSize: 0,
-              outputMimeType: "",
-              outputWidth: 0,
-              outputHeight: 0,
-              error: "",
-            }
-          : item
-      );
+    updateVideo({
+      status: "processing",
+      progress: 0,
+      outputUrl: "",
+      outputName: "",
+      outputSize: 0,
+      outputMimeType: "",
+      outputWidth: 0,
+      outputHeight: 0,
+      outputKey: "",
+      error: "",
     });
 
-    let settled = false;
     let lastProgress = 0;
-
-    const report = (value) => {
-      if (!isCurrent()) {
-        return;
-      }
-
-      if (hooks.onProgress) {
-        hooks.onProgress(value);
-        return;
-      }
-
-      setProcessingProgress(Math.round(value));
-    };
 
     try {
       const result = await processVideo(
         video,
         settings,
         (progress) => {
-          if (settled || !isCurrent()) {
+          if (!stillCurrent()) {
             return;
           }
 
-          const safeProgress = Math.min(
-            99,
-            Math.max(
-              lastProgress,
-              Math.round(Number(progress) || 0)
-            )
-          );
+          const safe = Math.min(99, Math.max(lastProgress, Math.round(Number(progress) || 0)));
 
-          if (safeProgress === lastProgress) {
+          if (safe === lastProgress) {
             return;
           }
 
-          lastProgress = safeProgress;
-
-          setVideos((previous) => {
-            if (!isCurrent()) {
-              return previous;
-            }
-
-            return previous.map((item) => {
-              if (item.id !== videoId || item.status === "done") {
-                return item;
-              }
-
-              return {
-                ...item,
-                status: "processing",
-                progress: safeProgress,
-              };
-            });
-          });
-
-          report(safeProgress);
-        }
-      );
-
-      settled = true;
-
-      if (!isCurrent()) {
-        if (result?.outputUrl) {
-          URL.revokeObjectURL(result.outputUrl);
-        }
-
-        return false;
-      }
-
-      setVideos((previous) => {
-        const next = previous.map((item) =>
-          item.id === videoId
-            ? {
-                ...item,
-                status: "done",
-                progress: 100,
-                outputUrl: result.outputUrl,
-                outputName: result.name,
-                outputSize: result.size,
-                outputMimeType: result.mimeType,
-                outputWidth: result.width,
-                outputHeight: result.height,
-                error: "",
-              }
-            : item
-        );
-
-        videosRef.current = next;
-        return next;
-      });
-
-      report(100);
-      return true;
-    } catch (error) {
-      settled = true;
-      console.error(`Processing failed for ${video.name}:`, error);
-
-      if (!isCurrent()) {
-        return false;
-      }
-
-      setVideos((previous) => {
-        const next = previous.map((item) =>
-          item.id === videoId
-            ? {
-                ...item,
-                status: "error",
-                progress: 0,
-                error: error?.message || "Processing failed.",
-              }
-            : item
-        );
-
-        videosRef.current = next;
-        return next;
-      });
-
-      report(100);
-      return false;
-    }
-  };
-
-  const pausePlayback = () => {
-    Object.values(videoRefs.current).forEach((video) => {
-      if (video && !video.paused) {
-        video.pause();
-      }
-    });
-
-    setPlayingVideoId(null);
-  };
-
-  const processOne = async (videoId) => {
-    if (isProcessing || isReading) {
-      return;
-    }
-
-    const video = videosRef.current.find((item) => item.id === videoId);
-
-    if (!video || video.status === "loading") {
-      return;
-    }
-
-    pausePlayback();
-    setOpenMenuId(null);
-    setScreen("results");
-    setIsProcessing(true);
-    setProcessingProgress(0);
-    setProcessingMessage(`Processing ${video.name}`);
-
-    try {
-      const success = await runVideoProcess(videoId, {
-        onProgress: (value) => {
-          setProcessingProgress(Math.round(value));
+          lastProgress = safe;
+          updateVideo({ progress: safe });
+          onProgress?.(safe);
         },
+        signal
+      );
+
+      if (!stillCurrent()) {
+        URL.revokeObjectURL(result.outputUrl);
+        return "skipped";
+      }
+
+      updateVideo({
+        status: "done",
+        progress: 100,
+        outputUrl: result.outputUrl,
+        outputName: result.name,
+        outputSize: result.size,
+        outputMimeType: result.mimeType,
+        outputWidth: result.width,
+        outputHeight: result.height,
+        outputKey: key,
+        error: "",
       });
 
-      setProcessingProgress(100);
-      setProcessingMessage(
-        success
-          ? `${video.name} processed.`
-          : `${video.name} failed.`
-      );
-      setSelectedIds(
-        videosRef.current
-          .filter((item) => item.status === "done" && item.outputUrl)
-          .map((item) => item.id)
-      );
-    } finally {
-      setIsProcessing(false);
+      onProgress?.(100);
+      return "done";
+    } catch (error) {
+      if (!stillCurrent()) {
+        return "skipped";
+      }
+
+      if (isCancelled(error)) {
+        updateVideo({ status: "ready", progress: 0, error: "" });
+        return "cancelled";
+      }
+
+      console.error(`Processing failed for ${video.name}:`, error);
+      updateVideo({
+        status: "error",
+        progress: 0,
+        error: error?.message || "Processing failed.",
+      });
+      onProgress?.(100);
+      return "error";
     }
+  };
+
+  const selectFinished = () => {
+    setSelectedIds(
+      videosRef.current
+        .filter((video) => video.status === "done" && video.outputUrl)
+        .map((video) => video.id)
+    );
   };
 
   const processAll = async () => {
-    if (!videos.length || isProcessing || isReading) {
+    if (!videos.length || isProcessing || isReading || isUploading) {
       return;
     }
 
     pausePlayback();
 
-    const pending = videosRef.current.filter(
-      (video) => video.status !== "loading" && video.status !== "done"
-    );
-    const queue = (
-      pending.length
-        ? pending
-        : videosRef.current.filter((video) => video.status !== "loading")
-    ).map((video) => video.id);
+    const queue = videosRef.current
+      .filter((video) => video.status !== "loading")
+      .filter(
+        (video) => !(video.status === "done" && video.outputKey === settingsKey)
+      )
+      .map((video) => video.id);
+
+    setScreen("results");
+    setResultsError("");
 
     if (!queue.length) {
+      setProcessingMessage("Every video is already processed with these settings.");
+      selectFinished();
       return;
     }
 
-    setOpenMenuId(null);
-    setScreen("results");
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setIsProcessing(true);
     setProcessingProgress(0);
 
     let successCount = 0;
+    let cancelled = false;
+    // Track finished ids here. videosRef may not have the last update yet,
+    // which is why the last video used to stay unticked.
+    const doneIds = [];
 
     try {
       for (let index = 0; index < queue.length; index += 1) {
+        if (controller.signal.aborted) {
+          cancelled = true;
+          break;
+        }
+
         const id = queue[index];
         const current = videosRef.current.find((video) => video.id === id);
 
         setProcessingMessage(
-          `Processing ${index + 1} of ${queue.length}${
-            current ? `: ${current.name}` : ""
-          }`
+          `Processing ${index + 1} of ${queue.length}${current ? `: ${current.name}` : ""}`
         );
 
-        const success = await runVideoProcess(id, {
+        const result = await runVideoProcess(id, {
+          signal: controller.signal,
           onProgress: (value) => {
             const overall =
-              ((index + Math.min(100, Number(value) || 0) / 100) /
-                queue.length) *
-              100;
-
+              ((index + Math.min(100, Number(value) || 0) / 100) / queue.length) * 100;
             setProcessingProgress(Math.round(overall));
           },
         });
 
-        if (success) {
+        if (result === "done") {
           successCount += 1;
+          doneIds.push(id);
+        }
+
+        if (result === "cancelled") {
+          cancelled = true;
+          break;
         }
       }
 
       setProcessingProgress(100);
       setProcessingMessage(
-        `${successCount} of ${queue.length} videos processed.`
+        cancelled
+          ? `Cancelled. ${successCount} of ${queue.length} videos were processed.`
+          : `${successCount} of ${queue.length} videos processed.`
       );
-      setSelectedIds(
-        videosRef.current
-          .filter((video) => video.status === "done" && video.outputUrl)
-          .map((video) => video.id)
-      );
+
+      const alreadyDone = videosRef.current
+        .filter((video) => video.status === "done" && video.outputUrl)
+        .map((video) => video.id);
+      setSelectedIds([...new Set([...alreadyDone, ...doneIds])]);
     } finally {
+      abortRef.current = null;
       setIsProcessing(false);
     }
   };
 
-  const handleDownload = (video) => {
-    if (!video?.outputUrl) {
-      return;
-    }
-
-    const link = document.createElement("a");
-
-    link.href = video.outputUrl;
-    link.download =
-      video.outputName ||
-      `${video.name.replace(/\.[^/.]+$/, "")}_resized.${outputFormat.toLowerCase()}`;
-
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const cancelProcessing = () => {
+    abortRef.current?.abort();
   };
 
-  const handleDownloadAll = () => {
-    const completed = videos.filter((video) => video.outputUrl);
-
-    completed.forEach((video, index) => {
-      window.setTimeout(() => {
-        handleDownload(video);
-      }, index * 500);
-    });
+  const handleDownload = (video) => {
+    if (video?.outputUrl) {
+      downloadUrl(
+        video.outputUrl,
+        video.outputName ||
+          `${video.name.replace(/\.[^/.]+$/, "")}_resized.${outputFormat.toLowerCase()}`
+      );
+    }
   };
 
   const readyVideos = videos.filter(
     (video) => video.status === "done" && video.outputUrl
   );
-
-  const selectedVideos = readyVideos.filter((video) =>
-    selectedIds.includes(video.id)
-  );
-
+  const selectedVideos = readyVideos.filter((video) => selectedIds.includes(video.id));
   const allReadySelected =
-    readyVideos.length > 0 &&
-    readyVideos.every((video) => selectedIds.includes(video.id));
+    readyVideos.length > 0 && readyVideos.every((video) => selectedIds.includes(video.id));
+
+  const resultItems = videos.map((video) => {
+    const ready = video.status === "done" && Boolean(video.outputUrl);
+    let state = isProcessing ? "waiting" : "idle";
+
+    if (video.status === "processing") {
+      state = "processing";
+    } else if (video.status === "error") {
+      state = "error";
+    } else if (ready) {
+      state = video.outputKey === settingsKey ? "done" : "stale";
+    }
+
+    return {
+      id: video.id,
+      name: video.outputName || video.name,
+      thumb: video.thumbnailUrl,
+      bytes: ready ? video.outputSize : 0,
+      type: fileTypeLabel(video),
+      state,
+      progress: video.progress,
+      error: video.error,
+      ready,
+    };
+  });
 
   const toggleSelected = (id) => {
     setSelectedIds((previous) =>
-      previous.includes(id)
-        ? previous.filter((item) => item !== id)
-        : [...previous, id]
+      previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id]
     );
   };
 
   const toggleSelectAll = () => {
-    setSelectedIds(
-      allReadySelected ? [] : readyVideos.map((video) => video.id)
-    );
-  };
-
-  const filesForZip = async (list) => {
-    const used = new Set();
-    const files = [];
-
-    for (const video of list) {
-      const response = await fetch(video.outputUrl);
-      const blob = await response.blob();
-      const name = uniqueFileName(
-        video.outputName ||
-          `${video.name.replace(/\.[^/.]+$/, "")}_resized.mp4`,
-        used
-      );
-
-      files.push({ name, blob });
-    }
-
-    return files;
+    setSelectedIds(allReadySelected ? [] : readyVideos.map((video) => video.id));
   };
 
   const downloadZip = async (list, zipName) => {
@@ -1276,77 +1069,82 @@ function VideoResizer() {
     }
 
     setZipping(true);
-    setOpenMenuId(null);
+    setResultsError("");
 
     try {
-      const zip = await createZip(await filesForZip(list));
-      downloadBlob(zip, zipName);
+      const files = [];
+
+      for (const video of list) {
+        const response = await fetch(video.outputUrl);
+        files.push({
+          name: video.outputName || `${video.name.replace(/\.[^/.]+$/, "")}_resized.mp4`,
+          blob: await response.blob(),
+        });
+      }
+
+      downloadBlob(await createZip(files), zipName);
     } catch (error) {
       console.error("ZIP download failed:", error);
-      setUploadMessage("Could not create the ZIP file.");
+      setResultsError(error?.message || "Could not create the ZIP file.");
     } finally {
       setZipping(false);
     }
   };
 
   const downloadSeparately = (list) => {
-    list.forEach((video, index) => {
-      window.setTimeout(() => {
-        handleDownload(video);
-      }, index * 400);
-    });
+    downloadMany(list.map((video) => ({ url: video.outputUrl, name: video.outputName })));
   };
 
   const startNewBatch = () => {
-    videos.forEach(revokeVideoUrls);
-    videoRefs.current = {};
-    setVideos([]);
-    setPlayingVideoId(null);
-    setUploadMessage("");
-    setSelectedIds([]);
-    setOpenMenuId(null);
-    setProcessingMessage("");
+    clearVideos();
     setScreen("editor");
   };
 
   const scalePercent = ((scale - 50) / 150) * 100;
-  const speedPercent = ((speed - 0.25) / 1.75) * 100;
+  const speedPercent = ((speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 100;
 
   const statusLabel = isProcessing
     ? processingMessage || "Processing..."
-    : isReading
+    : isReading || isUploading
       ? "Reading videos..."
-      : completedCount === videos.length && videos.length > 0
+      : allCurrent
         ? "All videos ready"
-        : "Ready to process";
+        : staleCount > 0
+          ? "Settings changed. Process again to apply them."
+          : "Ready to process";
 
   return (
     <div className="video-page">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/*,.mkv,.avi,.mov"
+        multiple
+        hidden
+        onChange={handleFileInput}
+      />
+
       <main className="video-resizer-page">
         {videos.length === 0 && (
-        <section className="video-page-header">
-          <div className="video-header-content">
-            <span className="video-header-label">
-              VIDEO TOOL
-            </span>
+          <section className="video-page-header">
+            <div className="video-header-content">
+              <span className="video-header-label">VIDEO TOOL</span>
 
-            <h1>
-              Resize your <span>video.</span>
-            </h1>
+              <h1>
+                Resize your <span>video.</span>
+              </h1>
 
-            <p>
-              Resize, scale, change speed, mute audio, and optimize your videos.
-            </p>
-          </div>
-        </section>
+              <p>Resize, scale, change speed, mute audio, and optimize your videos.</p>
+            </div>
+          </section>
         )}
 
-        {screen !== "results" && videos.length === 0 && (
+        {videos.length === 0 && (
           <section className="video-upload-section">
             <div
-              className={`video-drop-zone ${
-                isDragging ? "dragging" : ""
-              } ${isUploading ? "uploading" : ""}`}
+              className={`video-drop-zone ${isDragging ? "dragging" : ""} ${
+                isUploading ? "uploading" : ""
+              }`}
               onDragOver={handleDragOver}
               onDragEnter={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -1360,19 +1158,21 @@ function VideoResizer() {
               }}
               role="button"
               tabIndex={0}
+              aria-label="Choose videos to resize"
+              aria-busy={isUploading}
             >
-              <div className="video-upload-icon">↑</div>
+              <div className="video-upload-icon" aria-hidden="true">
+                ↑
+              </div>
 
-              <h2>
-                {isUploading ? "Uploading videos..." : "Drag & Drop your videos"}
-              </h2>
+              <h2>{isUploading ? "Reading videos..." : "Drag & Drop your videos"}</h2>
 
               <p>
                 {isUploading ? (
-                  "Reading your files"
+                  "Your files stay on this device"
                 ) : (
                   <>
-                    or <span className="browse-text">browse to upload</span>
+                    or <span className="browse-text">browse your files</span>
                   </>
                 )}
               </p>
@@ -1382,36 +1182,23 @@ function VideoResizer() {
                   <div className="upload-progress-fill" />
                 </div>
               ) : (
-                <button
-                  type="button"
-                  className="choose-video-button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    handleChooseVideos();
-                  }}
-                >
+                // Not a nested <button>: the whole drop zone is already the button.
+                <span className="choose-video-button" aria-hidden="true">
                   Choose Videos
-                </button>
+                </span>
               )}
 
               <div className="upload-formats">
                 <span>MP4 • MOV • AVI • WEBM</span>
-                <span>Maximum 500 MB per video</span>
+                <span>Maximum {MAX_FILE_LABEL} per video</span>
               </div>
             </div>
 
             {uploadMessage && (
-              <p className="upload-message">{uploadMessage}</p>
+              <p className="upload-message" role="alert">
+                {uploadMessage}
+              </p>
             )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/*"
-              multiple
-              hidden
-              onChange={handleFileInput}
-            />
           </section>
         )}
 
@@ -1436,14 +1223,13 @@ function VideoResizer() {
             <div className="video-editor-toolbar">
               <div className="toolbar-left">
                 <span className="video-count">
-                  {videos.length}{" "}
-                  {videos.length === 1 ? "VIDEO" : "VIDEOS"}
+                  {videos.length} {videos.length === 1 ? "VIDEO" : "VIDEOS"}
                 </span>
 
                 <button
                   type="button"
                   className="toolbar-add-button"
-                  disabled={isProcessing}
+                  disabled={isProcessing || isUploading}
                   onClick={handleChooseVideos}
                 >
                   <span className="plus-icon">+</span>
@@ -1453,21 +1239,17 @@ function VideoResizer() {
                 <button
                   type="button"
                   className="toolbar-clear-button"
-                  disabled={isProcessing}
+                  disabled={isProcessing || isUploading}
                   onClick={clearVideos}
                 >
                   Clear
                 </button>
               </div>
 
-              <div className="processing-status">
+              <div className="processing-status" role="status">
                 <span
                   className={`status-dot ${
-                    isProcessing
-                      ? "processing"
-                      : completedCount === videos.length
-                        ? "complete"
-                        : ""
+                    isProcessing ? "processing" : allCurrent ? "complete" : ""
                   }`}
                 />
                 {statusLabel}
@@ -1475,24 +1257,15 @@ function VideoResizer() {
             </div>
 
             {uploadMessage && (
-              <p className="upload-message toolbar-message">
+              <p className="upload-message toolbar-message" role="alert">
                 {uploadMessage}
               </p>
             )}
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/*"
-              multiple
-              hidden
-              onChange={handleFileInput}
-            />
-
             {isUploading && (
               <div className="upload-banner" role="status">
                 <span className="upload-banner-spin" />
-                <strong>Uploading your videos</strong>
+                <strong>Reading your videos</strong>
                 <div className="upload-progress-track">
                   <div className="upload-progress-fill" />
                 </div>
@@ -1507,7 +1280,6 @@ function VideoResizer() {
                 </div>
 
                 <div className="settings-scroll">
-
                   <div className="setting-group">
                     <div className="setting-title-row">
                       <div>
@@ -1522,15 +1294,13 @@ function VideoResizer() {
                           key={item.id}
                           type="button"
                           disabled={isProcessing}
+                          aria-pressed={aspectRatio === item.id}
                           className={`aspect-option ${
                             aspectRatio === item.id ? "active" : ""
                           }`}
                           onClick={() => setAspectRatio(item.id)}
                         >
-                          <div className={`aspect-shape ${item.id}`}>
-                            {item.label}
-                          </div>
-
+                          <div className={`aspect-shape ${item.id}`}>{item.label}</div>
                           <strong>{item.name}</strong>
                           <small>{item.size}</small>
                         </button>
@@ -1545,16 +1315,15 @@ function VideoResizer() {
                         <p>Zoom video inside frame</p>
                       </div>
 
-                      <strong className="yellow-value">
-                        {scale}%
-                      </strong>
+                      <strong className="yellow-value">{scale}%</strong>
                     </div>
 
                     <div className="slider-row">
                       <button
                         type="button"
                         className="small-control"
-                        disabled={isProcessing}
+                        disabled={isProcessing || scale <= 50}
+                        aria-label="Zoom out"
                         onClick={() => handleScaleChange(scale - 10)}
                       >
                         −
@@ -1568,19 +1337,16 @@ function VideoResizer() {
                         value={scale}
                         disabled={isProcessing}
                         aria-label="Scale"
-                        onChange={(event) =>
-                          handleScaleChange(event.target.value)
-                        }
+                        onChange={(event) => handleScaleChange(event.target.value)}
                         className="yellow-slider"
-                        style={{
-                          "--slider-fill": `${scalePercent}%`,
-                        }}
+                        style={{ "--slider-fill": `${scalePercent}%` }}
                       />
 
                       <button
                         type="button"
                         className="small-control"
-                        disabled={isProcessing}
+                        disabled={isProcessing || scale >= 200}
+                        aria-label="Zoom in"
                         onClick={() => handleScaleChange(scale + 10)}
                       >
                         +
@@ -1601,9 +1367,7 @@ function VideoResizer() {
                         <p>Change video speed</p>
                       </div>
 
-                      <strong className="yellow-value">
-                        {speed}×
-                      </strong>
+                      <strong className="yellow-value">{speed}×</strong>
                     </div>
 
                     <div className="speed-buttons">
@@ -1612,9 +1376,8 @@ function VideoResizer() {
                           key={speedValue}
                           type="button"
                           disabled={isProcessing}
-                          className={
-                            speed === speedValue ? "active" : ""
-                          }
+                          aria-pressed={speed === speedValue}
+                          className={speed === speedValue ? "active" : ""}
                           onClick={() => handleSpeedChange(speedValue)}
                         >
                           {speedValue}×
@@ -1625,23 +1388,29 @@ function VideoResizer() {
                     <div className="speed-slider-row">
                       <input
                         type="range"
-                        min="0.25"
-                        max="2"
-                        step="0.25"
+                        min={MIN_SPEED}
+                        max={MAX_SPEED}
+                        step="0.05"
                         value={speed}
                         disabled={isProcessing}
                         aria-label="Speed"
-                        onChange={(event) =>
-                          handleSpeedChange(event.target.value)
-                        }
+                        onChange={(event) => handleSpeedChange(event.target.value)}
                         className="yellow-slider"
-                        style={{
-                          "--slider-fill": `${speedPercent}%`,
-                        }}
+                        style={{ "--slider-fill": `${speedPercent}%` }}
                       />
 
-                      <div className="speed-number">{speed}</div>
+                      <SpeedInput
+                        value={speed}
+                        disabled={isProcessing}
+                        onCommit={handleSpeedChange}
+                      />
                       <span>×</span>
+                    </div>
+
+                    <div className="slider-labels">
+                      <span>{MIN_SPEED}×</span>
+                      <span>1×</span>
+                      <span>{MAX_SPEED}×</span>
                     </div>
                   </div>
 
@@ -1656,10 +1425,11 @@ function VideoResizer() {
                     <button
                       type="button"
                       disabled={isProcessing}
+                      aria-pressed={muted}
                       className={`mute-button ${muted ? "active" : ""}`}
                       onClick={() => setMuted((value) => !value)}
                     >
-                      <span>{muted ? "🔇" : "🔊"}</span>
+                      <span aria-hidden="true">{muted ? "🔇" : "🔊"}</span>
                       {muted ? "Audio Muted" : "Mute Audio"}
                     </button>
                   </div>
@@ -1670,13 +1440,10 @@ function VideoResizer() {
                     <div className="output-grid">
                       <label>
                         <span>Format</span>
-
                         <select
                           value={outputFormat}
                           disabled={isProcessing}
-                          onChange={(event) =>
-                            setOutputFormat(event.target.value)
-                          }
+                          onChange={(event) => setOutputFormat(event.target.value)}
                         >
                           <option value="MP4">MP4</option>
                           <option value="WEBM">WEBM</option>
@@ -1686,20 +1453,23 @@ function VideoResizer() {
 
                       <label>
                         <span>Quality</span>
-
                         <select
                           value={quality}
                           disabled={isProcessing}
-                          onChange={(event) =>
-                            setQuality(event.target.value)
-                          }
+                          onChange={(event) => setQuality(event.target.value)}
                         >
+                          <option value="Original">Original</option>
                           <option value="High">High</option>
                           <option value="Medium">Medium</option>
                           <option value="Low">Low</option>
                         </select>
                       </label>
                     </div>
+
+                    <p className="export-summary">
+                      Frame rate stays the same as the source. WEBM is slower to
+                      create than MP4.
+                    </p>
                   </div>
                 </div>
 
@@ -1707,21 +1477,17 @@ function VideoResizer() {
                   <button
                     type="button"
                     className="export-button"
-                    disabled={isProcessing || isReading}
+                    disabled={isProcessing || isReading || isUploading}
                     onClick={processAll}
                   >
                     {isProcessing ? (
                       "Processing..."
-                    ) : isReading ? (
+                    ) : isReading || isUploading ? (
                       "Reading videos..."
                     ) : (
                       <>
-                        Process all
-                        <svg
-                          className="export-arrow"
-                          viewBox="0 0 20 20"
-                          aria-hidden="true"
-                        >
+                        {allCurrent ? "View results" : "Process all"}
+                        <svg className="export-arrow" viewBox="0 0 20 20" aria-hidden="true">
                           <path d="M3.5 10h12" />
                           <path d="M11 5.5 15.5 10 11 14.5" />
                         </svg>
@@ -1732,9 +1498,7 @@ function VideoResizer() {
               </aside>
 
               <div
-                className={`video-workspace ${
-                  isDragging ? "is-dropping" : ""
-                }`}
+                className={`video-workspace ${isDragging ? "is-dropping" : ""}`}
                 onDragOver={handleDragOver}
                 onDragEnter={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -1743,69 +1507,54 @@ function VideoResizer() {
                 <div className="video-set-header">
                   <div>
                     <h2>Your Videos</h2>
-                    <p>
-                      Scroll horizontally to view all uploaded videos
-                    </p>
+                    <p>Scroll horizontally to view all uploaded videos</p>
                   </div>
 
                   <span className="files-badge">
-                    {videos.length}{" "}
-                    {videos.length === 1 ? "file" : "files"}
+                    {videos.length} {videos.length === 1 ? "file" : "files"}
                   </span>
                 </div>
 
-                <div
-                  className="horizontal-video-area"
-                  ref={videoWindow.setNode}
-                >
+                <div className="horizontal-video-area" ref={videoWindow.setNode}>
                   <div
                     className="horizontal-video-track is-virtual"
-                    style={{
-                      width: videoWindow.total + 266,
-                    }}
+                    style={{ width: videoWindow.total + 266 }}
                   >
                     {videos.slice(videoWindow.start, videoWindow.end).map((video, index) => {
                       const itemIndex = videoWindow.start + index;
-                      const previewRatio = getPreviewRatio(
-                        aspectRatio,
-                        video
-                      );
+                      const previewRatio = getPreviewRatio(aspectRatio, video);
+                      const isActive = activeVideoId === video.id;
+                      const isPlaying = playingVideoId === video.id;
+                      const current = isCurrent(video);
+                      const stale = video.status === "done" && !current;
 
                       return (
                         <article
                           key={video.id}
-                          className={`video-list-item ${
-                            video.status === "done" ? "processed" : ""
-                          } ${
+                          className={`video-list-item ${current ? "processed" : ""} ${
                             video.status === "loading" ? "is-uploading" : ""
                           }`}
-                          style={{
-                            left: itemIndex * (cardWidth + 16),
-                            width: cardWidth,
-                          }}
+                          style={{ left: itemIndex * (cardWidth + 16), width: cardWidth }}
                         >
                           <div className="video-card-preview-stage">
                             <div
                               className="video-preview-frame"
-                              style={{
-                                "--preview-ratio": previewRatio,
-                              }}
+                              style={{ "--preview-ratio": previewRatio }}
                             >
                               <div
                                 className="video-preview-media"
-                                style={{
-                                  transform: `scale(${scale / 100})`,
-                                }}
+                                style={{ transform: `scale(${scale / 100})` }}
                               >
-                                {video.thumbnailUrl &&
-                                  playingVideoId !== video.id && (
-                                    <img
-                                      src={video.thumbnailUrl}
-                                      className="video-card-thumbnail"
-                                      alt={video.name}
-                                    />
-                                  )}
+                                {video.thumbnailUrl && !isActive && (
+                                  <img
+                                    src={video.thumbnailUrl}
+                                    className="video-card-thumbnail"
+                                    alt={video.name}
+                                  />
+                                )}
 
+                                {/* No native controls: they were clipped or tiny
+                                    inside the scaled frame. Click the video to pause. */}
                                 <video
                                   ref={(element) => {
                                     if (element) {
@@ -1817,79 +1566,72 @@ function VideoResizer() {
                                     }
                                   }}
                                   src={video.url}
-                                  className={`video-card-player ${
-                                    playingVideoId === video.id
-                                      ? "visible"
-                                      : ""
-                                  }`}
+                                  className={`video-card-player ${isActive ? "visible" : ""}`}
                                   preload="metadata"
                                   playsInline
-                                  controls={playingVideoId === video.id}
                                   muted={muted}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    event.currentTarget.pause();
+                                  }}
                                   onPlay={() => setPlayingVideoId(video.id)}
+                                  onPause={() =>
+                                    setPlayingVideoId((id) => (id === video.id ? null : id))
+                                  }
                                   onEnded={() => {
-                                    setPlayingVideoId((current) =>
-                                      current === video.id ? null : current
-                                    );
+                                    setPlayingVideoId((id) => (id === video.id ? null : id));
+                                    setActiveVideoId((id) => (id === video.id ? null : id));
                                   }}
                                 />
                               </div>
 
-                              {playingVideoId !== video.id && (
+                              {!isPlaying && (
                                 <div className="video-card-play-layer">
                                   <button
                                     type="button"
                                     className="card-play-button"
-                                    onClick={(event) =>
-                                      playVideo(video.id, event)
-                                    }
-                                    aria-label="Play video"
+                                    onClick={(event) => playVideo(video.id, event)}
+                                    aria-label={`Play ${video.name}`}
                                   >
                                     ▶
                                   </button>
                                 </div>
                               )}
 
-                              {!video.thumbnailUrl &&
-                                playingVideoId !== video.id && (
-                                  <div className="video-preview-fallback">
-                                    <span>▶</span>
-                                    <small>
-                                      {video.status === "loading"
-                                        ? "Reading video..."
-                                        : "Click to preview"}
-                                    </small>
-                                  </div>
-                                )}
+                              {!video.thumbnailUrl && !isActive && (
+                                <div className="video-preview-fallback">
+                                  <span>▶</span>
+                                  <small>
+                                    {video.status === "loading"
+                                      ? "Reading video..."
+                                      : "No preview available"}
+                                  </small>
+                                </div>
+                              )}
 
                               <span className="card-duration">
                                 {previewDuration(video, speed)}
                               </span>
 
-                              {video.status === "done" && (
-                                <span className="video-done-badge">
-                                  ✓ Ready
-                                </span>
+                              {current && <span className="video-done-badge">✓ Ready</span>}
+
+                              {stale && (
+                                <span className="video-stale-badge">Settings changed</span>
                               )}
 
                               {video.status === "error" && (
-                                <span className="video-error-badge">
-                                  Error
-                                </span>
+                                <span className="video-error-badge">Error</span>
                               )}
                             </div>
                           </div>
 
                           <div className="video-card-details">
-                            <div
-                              className="video-card-name"
-                              title={video.name}
-                            >
+                            <div className="video-card-name" title={video.name}>
                               {video.name}
                             </div>
 
                             <div className="video-meta">
-                              {previewSizeLabel(aspectRatio, video)}
+                              {outputSizeLabel(video, aspectRatio, quality)}
                             </div>
 
                             {video.status === "processing" && (
@@ -1897,21 +1639,16 @@ function VideoResizer() {
                                 <div className="card-progress-bar">
                                   <div
                                     className="card-progress-fill"
-                                    style={{
-                                      width: `${video.progress}%`,
-                                    }}
+                                    style={{ width: `${video.progress}%` }}
                                   />
                                 </div>
                               </div>
                             )}
 
-                            {video.status === "done" && (
+                            {current && (
                               <div className="video-output-info">
-                                <span>
-                                  {formatFileSize(video.outputSize)}
-                                </span>
-
-                                {video.outputWidth && video.outputHeight && (
+                                <span>{formatFileSize(video.outputSize)}</span>
+                                {video.outputWidth > 0 && video.outputHeight > 0 && (
                                   <span>
                                     {video.outputWidth} × {video.outputHeight}
                                   </span>
@@ -1920,16 +1657,15 @@ function VideoResizer() {
                             )}
 
                             {video.status === "error" && (
-                              <div className="video-error-message">
-                                {video.error}
-                              </div>
+                              <div className="video-error-message">{video.error}</div>
                             )}
                           </div>
 
-                          {video.status === "done" && video.outputUrl && (
+                          {current && (
                             <button
                               type="button"
                               className="video-download-small"
+                              aria-label={`Download ${video.name}`}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 handleDownload(video);
@@ -1957,10 +1693,8 @@ function VideoResizer() {
 
                     <button
                       type="button"
-                      className={`add-video-card ${
-                        isDragging ? "is-dropping" : ""
-                      }`}
-                      disabled={isProcessing}
+                      className={`add-video-card ${isDragging ? "is-dropping" : ""}`}
+                      disabled={isProcessing || isUploading}
                       onClick={handleChooseVideos}
                       onDragOver={handleDragOver}
                       onDragEnter={handleDragOver}
@@ -1968,9 +1702,7 @@ function VideoResizer() {
                       style={{ left: videos.length * (cardWidth + 16) }}
                     >
                       <span>+</span>
-                      <strong>
-                        {isDragging ? "Drop Videos" : "Add Videos"}
-                      </strong>
+                      <strong>{isDragging ? "Drop Videos" : "Add Videos"}</strong>
                       <small>MP4 • MOV • AVI • WEBM</small>
                     </button>
                   </div>
@@ -1980,256 +1712,32 @@ function VideoResizer() {
           </section>
         )}
 
-        {screen === "results" && (
-          <section className="results-section">
-            <div className="results-toolbar">
-              <button
-                type="button"
-                className="results-select-button"
-                onClick={toggleSelectAll}
-              >
-                <span
-                  className={`results-checkbox ${
-                    allReadySelected ? "checked" : ""
-                  }`}
-                >
-                  {allReadySelected ? "✓" : ""}
-                </span>
-                {allReadySelected ? "Deselect All" : "Select All"}
-                <span className="results-selected-note">
-                  {selectedVideos.length} selected
-                </span>
-              </button>
-
-              <div className="results-toolbar-actions">
-                <button
-                  type="button"
-                  className="results-outline-button"
-                  disabled={!readyVideos.length || zipping}
-                  onClick={() =>
-                    downloadZip(readyVideos, "resizepro-videos.zip")
-                  }
-                >
-                  <UiIcon name="download" />
-                  {zipping ? "Preparing ZIP..." : "Download All as ZIP file"}
-                </button>
-
-                <button
-                  type="button"
-                  className="results-outline-button"
-                  disabled={!readyVideos.length}
-                  onClick={() => downloadSeparately(readyVideos)}
-                >
-                  <UiIcon name="download" />
-                  Download All Separately
-                </button>
-              </div>
-            </div>
-
-            <div className="results-selected-bar">
-              <span>
-                {isProcessing
-                  ? processingMessage
-                  : `${selectedVideos.length} selected`}
-              </span>
-
-              {isProcessing ? (
-                <strong className="results-overall-percent">
-                  {processingProgress}%
-                </strong>
-              ) : (
-                <button
-                  type="button"
-                  className="results-primary-button"
-                  disabled={!selectedVideos.length || zipping}
-                  onClick={() =>
-                    downloadZip(selectedVideos, "resizepro-selected.zip")
-                  }
-                >
-                  <UiIcon name="download" />
-                  Download Selected ZIP
-                </button>
-              )}
-            </div>
-
-            {isProcessing && (
-              <div className="results-overall-bar">
-                <div
-                  className="card-progress-fill"
-                  style={{ width: `${processingProgress}%` }}
-                />
-              </div>
-            )}
-
-            <div className="results-table">
-              <div className="results-table-head">
-                <span>Name</span>
-                <span>Size</span>
-                <span>Type</span>
-                <span>Status</span>
-                <span />
-              </div>
-
-              <div className="results-virtual">
-              {videos.map((video) => {
-                const ready = video.status === "done" && video.outputUrl;
-                const selected = selectedIds.includes(video.id);
-
-                return (
-                  <div
-                    key={video.id}
-                    className={`results-row ${selected ? "selected" : ""}`}
-                  >
-                    <button
-                      type="button"
-                      className={`results-checkbox ${
-                        selected ? "checked" : ""
-                      }`}
-                      disabled={!ready}
-                      onClick={() => toggleSelected(video.id)}
-                      aria-label={`Select ${video.name}`}
-                    >
-                      {selected ? "✓" : ""}
-                    </button>
-
-                    <div className="results-file">
-                      {video.thumbnailUrl ? (
-                        <img src={video.thumbnailUrl} alt="" />
-                      ) : (
-                        <span className="results-file-fallback">▶</span>
-                      )}
-
-                      <strong title={video.outputName || video.name}>
-                        {video.outputName || video.name}
-                      </strong>
-                    </div>
-
-                    <span className="results-size">
-                      {ready
-                        ? formatFileSize(video.outputSize)
-                        : video.status === "error"
-                          ? "Failed"
-                          : "—"}
-                    </span>
-
-                    <span className="results-type">
-                      {fileTypeLabel(video)}
-                    </span>
-
-                    {video.status === "processing" ? (
-                      <div className="results-live-status">
-                        <div className="card-progress-bar">
-                          <div
-                            className="card-progress-fill"
-                            style={{
-                              width: `${Math.round(video.progress)}%`,
-                            }}
-                          />
-                        </div>
-                        <span>{Math.round(video.progress)}%</span>
-                      </div>
-                    ) : video.status === "error" ? (
-                      <span className="results-status error">!</span>
-                    ) : video.status === "done" ? (
-                      <span className="results-status done">✓</span>
-                    ) : (
-                      <span className="results-wait">
-                        {isProcessing ? "Waiting" : "Ready"}
-                      </span>
-                    )}
-
-                    <div className="results-row-actions">
-                      <button
-                        type="button"
-                        className="results-icon-button"
-                        disabled={!ready}
-                        onClick={() => handleDownload(video)}
-                        aria-label={`Download ${video.name}`}
-                      >
-                        <UiIcon name="download" />
-                      </button>
-
-                      <div className="results-menu-wrap">
-                        <button
-                          type="button"
-                          className="results-icon-button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setOpenMenuId((current) =>
-                              current === video.id ? null : video.id
-                            );
-                          }}
-                          aria-label="More actions"
-                        >
-                          <UiIcon name="more" />
-                        </button>
-
-                        {openMenuId === video.id && (
-                          <div className="results-menu">
-                            <button
-                              type="button"
-                              disabled={!ready}
-                              onClick={() => handleDownload(video)}
-                            >
-                              Download
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setOpenMenuId(null);
-                                removeVideo(video.id);
-                                setSelectedIds((previous) =>
-                                  previous.filter((id) => id !== video.id)
-                                );
-                              }}
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {video.status === "error" && (
-                      <p className="results-row-error">{video.error}</p>
-                    )}
-                  </div>
-                );
-              })}
-              </div>
-            </div>
-
-            <div className="results-footer">
-              <button
-                type="button"
-                className="results-outline-button"
-                disabled={isProcessing}
-                onClick={() => {
-                  setOpenMenuId(null);
-                  setScreen("editor");
-                }}
-              >
-                <svg
-                  className="export-arrow"
-                  viewBox="0 0 20 20"
-                  aria-hidden="true"
-                >
-                  <path d="M16.5 10H4.5" />
-                  <path d="M9 5.5 4.5 10 9 14.5" />
-                </svg>
-                Edit Settings
-              </button>
-
-              <button
-                type="button"
-                className="results-dark-button"
-                disabled={isProcessing}
-                onClick={startNewBatch}
-              >
-                Start New Batch
-              </button>
-            </div>
-          </section>
+        {screen === "results" && videos.length > 0 && (
+          <ResultsPanel
+            noun="video"
+            items={resultItems}
+            isProcessing={isProcessing}
+            progress={processingProgress}
+            statusMessage={processingMessage}
+            summary={processingMessage}
+            errorMessage={resultsError}
+            selectedIds={selectedIds}
+            onToggle={toggleSelected}
+            onToggleAll={toggleSelectAll}
+            onDownload={(id) => handleDownload(videos.find((video) => video.id === id))}
+            onRemove={removeVideo}
+            onCancel={cancelProcessing}
+            onZipSelected={() => downloadZip(selectedVideos, "resizepro-selected.zip")}
+            onZipAll={() => downloadZip(readyVideos, "resizepro-videos.zip")}
+            onDownloadSeparately={() => downloadSeparately(selectedVideos.length ? selectedVideos : readyVideos)}
+            zipping={zipping}
+            onEdit={() => {
+              setProcessingMessage("");
+              setResultsError("");
+              setScreen("editor");
+            }}
+            onNewBatch={startNewBatch}
+          />
         )}
       </main>
     </div>

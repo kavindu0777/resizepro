@@ -32,7 +32,7 @@
 }
 
 .logo-text span {
-  color: #e0ad00;
+  color: #a67c00;
 }
 
 .logo-icon {
@@ -71,7 +71,7 @@
 }
 
 .nav-link.active {
-  color: #d7ae00;
+  color: #8a6800;
 }
 
 .nav-link.active::after {

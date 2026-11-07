@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import "./ImageResizer.css";
 
+import ResultsPanel from "../components/ResultsPanel";
+
+import {
+  createZip,
+  downloadBlob,
+  downloadMany,
+  downloadUrl,
+  makeId,
+} from "../utils/files";
+
+const MAX_SIDE = 8000;
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+const PREVIEW_MAX_EDGE = 640;
+
 const ASPECTS = [
   { id: "original", label: "Original", hint: "Keep frame" },
   { id: "square", label: "1:1", hint: "1080 × 1080", width: 1080, height: 1080 },
@@ -10,12 +24,18 @@ const ASPECTS = [
   { id: "standard", label: "4:3", hint: "1440 × 1080", width: 1440, height: 1080 },
 ];
 
-const SIZE_PRESETS = [{ label: "Story", width: 1620, height: 2880 }];
+const SIZE_PRESETS = [
+  { label: "1620 × 2880", width: 1620, height: 2880 },
+  { label: "1080 × 1080", width: 1080, height: 1080 },
+  { label: "1920 × 1080", width: 1920, height: 1080 },
+  { label: "1280 × 720", width: 1280, height: 720 },
+  { label: "1080 × 1920", width: 1080, height: 1920 },
+];
 
 const FEATURES = [
   {
     title: "Exact size",
-    text: "Set the width and height in pixels, or lock the frame so the picture does not stretch.",
+    text: "Set the width and height in pixels. Keep the aspect ratio locked so the picture does not stretch.",
   },
   {
     title: "Percentage scale",
@@ -23,7 +43,7 @@ const FEATURES = [
   },
   {
     title: "Social frames",
-    text: "Fit images into square, story, portrait, landscape, and standard frames.",
+    text: "Fit images into square, story, portrait, landscape, and standard frames by cropping or adding bars.",
   },
   {
     title: "Rotate and flip",
@@ -31,7 +51,7 @@ const FEATURES = [
   },
   {
     title: "JPG, PNG, WebP",
-    text: "Choose the format you need. Quality applies to JPG and WebP.",
+    text: "Keep the original format and full quality by default, or choose JPG, PNG, or WebP.",
   },
   {
     title: "Batch download",
@@ -105,23 +125,78 @@ function Icon({ name }) {
   );
 }
 
+function clampSide(value) {
+  return Math.max(1, Math.min(MAX_SIDE, Math.round(Number(value) || 1)));
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not read this image."));
+    image.src = url;
+  });
+}
+
+function sourceSize(source) {
+  return {
+    width: source.naturalWidth || source.width,
+    height: source.naturalHeight || source.height,
+  };
+}
+
+// Decode each image once at a small size for the live previews.
+// Before, every slider tick re-decoded every full-resolution photo.
+const previewCache = new Map();
+
+function getPreviewSource(url) {
+  if (!previewCache.has(url)) {
+    const promise = loadImage(url).then((image) => {
+      const { width, height } = sourceSize(image);
+      const fit = Math.min(1, PREVIEW_MAX_EDGE / Math.max(width, height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * fit));
+      canvas.height = Math.max(1, Math.round(height * fit));
+      const context = canvas.getContext("2d");
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      return canvas;
+    });
+
+    promise.catch(() => previewCache.delete(url));
+    previewCache.set(url, promise);
+  }
+
+  return previewCache.get(url);
+}
+
+/**
+ * fit:
+ *  "fill"    – stretch to the exact size (only used when the shapes match)
+ *  "cover"   – fill the frame and crop the overflow
+ *  "contain" – fit inside the frame and add bars
+ */
 function drawEditedImage(source, settings, dest) {
+  const size = sourceSize(source);
   const swapped = settings.rotation % 180 !== 0;
-  const turnedWidth = swapped ? source.height : source.width;
-  const turnedHeight = swapped ? source.width : source.height;
+  const turnedWidth = swapped ? size.height : size.width;
+  const turnedHeight = swapped ? size.width : size.height;
   const turned = document.createElement("canvas");
   turned.width = turnedWidth;
   turned.height = turnedHeight;
+
   const turnedContext = turned.getContext("2d");
   turnedContext.translate(turnedWidth / 2, turnedHeight / 2);
   turnedContext.rotate((settings.rotation * Math.PI) / 180);
   turnedContext.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
-  turnedContext.drawImage(source, -source.width / 2, -source.height / 2);
+  turnedContext.drawImage(source, -size.width / 2, -size.height / 2);
 
   const context = dest.getContext("2d");
   context.clearRect(0, 0, dest.width, dest.height);
 
-  if (settings.format === "JPG" || settings.fit === "contain") {
+  // JPG has no transparency, so paint white first.
+  // PNG and WebP keep transparent bars.
+  if (settings.format === "JPG") {
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, dest.width, dest.height);
   }
@@ -131,8 +206,9 @@ function drawEditedImage(source, settings, dest) {
   let dx = 0;
   let dy = 0;
 
-  if (settings.fit === "contain") {
-    const scale = Math.min(dest.width / turned.width, dest.height / turned.height);
+  if (settings.fit === "contain" || settings.fit === "cover") {
+    const pick = settings.fit === "contain" ? Math.min : Math.max;
+    const scale = pick(dest.width / turned.width, dest.height / turned.height);
     drawWidth = turned.width * scale;
     drawHeight = turned.height * scale;
     dx = (dest.width - drawWidth) / 2;
@@ -159,27 +235,28 @@ function PreviewCanvas({
 
   useEffect(() => {
     let cancel = false;
-    loadImage(image.url).then((source) => {
-      const canvas = canvasRef.current;
 
-      if (cancel || !canvas) {
-        return;
-      }
+    getPreviewSource(image.url)
+      .then((source) => {
+        const canvas = canvasRef.current;
 
-      const safeZoom = zoom || 1;
-      const neutralWidth = targetWidth / safeZoom;
-      const neutralHeight = targetHeight / safeZoom;
-      const normalFit = Math.min(160 / neutralWidth, 190 / neutralHeight);
-      const largestFit = Math.min(250 / neutralWidth, 290 / neutralHeight);
-      const visual = Math.min(normalFit * safeZoom, largestFit);
-      canvas.width = Math.max(2, Math.round(neutralWidth * visual));
-      canvas.height = Math.max(2, Math.round(neutralHeight * visual));
-      drawEditedImage(
-        source,
-        { rotation, flipH, flipV, fit, format },
-        canvas
-      );
-    });
+        if (cancel || !canvas) {
+          return;
+        }
+
+        const safeZoom = zoom || 1;
+        const neutralWidth = targetWidth / safeZoom;
+        const neutralHeight = targetHeight / safeZoom;
+        const normalFit = Math.min(160 / neutralWidth, 190 / neutralHeight);
+        const largestFit = Math.min(250 / neutralWidth, 290 / neutralHeight);
+        const visual = Math.min(normalFit * safeZoom, largestFit);
+        canvas.width = Math.max(2, Math.round(neutralWidth * visual));
+        canvas.height = Math.max(2, Math.round(neutralHeight * visual));
+        drawEditedImage(source, { rotation, flipH, flipV, fit, format }, canvas);
+      })
+      .catch(() => {
+        // The card still shows the name; the export reports the real error.
+      });
 
     return () => {
       cancel = true;
@@ -189,109 +266,55 @@ function PreviewCanvas({
   return <canvas ref={canvasRef} className="image-preview-canvas" />;
 }
 
-function formatBytes(bytes) {
-  if (!bytes) {
-    return "—";
+// Lets the user clear the box and type a new number.
+// The old input forced "1" the moment it was empty.
+function NumberField({ value, onCommit, label }) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  return (
+    <input
+      type="number"
+      inputMode="numeric"
+      min="1"
+      max={MAX_SIDE}
+      aria-label={label}
+      value={draft}
+      onChange={(event) => {
+        const text = event.target.value;
+        const number = Number(text);
+        setDraft(text);
+
+        if (text !== "" && Number.isFinite(number) && number >= 1) {
+          onCommit(clampSide(number));
+        }
+      }}
+      onBlur={() => setDraft(String(value))}
+    />
+  );
+}
+
+// "ORIGINAL" keeps each image in the format it was uploaded in.
+function resolveFormat(format, image) {
+  if (format !== "ORIGINAL") {
+    return format;
   }
 
-  if (bytes < 1024 * 1024) {
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  const type = image?.file?.type || "";
+  const name = image?.name || "";
+
+  if (type === "image/png" || /\.png$/i.test(name)) {
+    return "PNG";
   }
 
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function clamp(value) {
-  return Math.max(1, Math.min(8000, Math.round(Number(value) || 1)));
-}
-
-function loadImage(url) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Could not read this image."));
-    image.src = url;
-  });
-}
-
-function crc32(bytes) {
-  let crc = ~0;
-
-  for (let index = 0; index < bytes.length; index += 1) {
-    crc ^= bytes[index];
-
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-    }
+  if (type === "image/webp" || /\.webp$/i.test(name)) {
+    return "WEBP";
   }
 
-  return ~crc >>> 0;
-}
-
-function dosTime(date) {
-  const time =
-    (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1);
-  const day =
-    ((date.getFullYear() - 1980) << 9) |
-    ((date.getMonth() + 1) << 5) |
-    date.getDate();
-
-  return { time, day };
-}
-
-async function buildZip(files) {
-  const encoder = new TextEncoder();
-  const parts = [];
-  const central = [];
-  let offset = 0;
-  const now = dosTime(new Date());
-
-  for (const file of files) {
-    const name = encoder.encode(file.name);
-    const data = new Uint8Array(await file.blob.arrayBuffer());
-    const crc = crc32(data);
-    const local = new Uint8Array(30 + name.length);
-
-    const view = new DataView(local.buffer);
-    view.setUint32(0, 0x04034b50, true);
-    view.setUint16(4, 20, true);
-    view.setUint16(8, 0, true);
-    view.setUint16(10, now.time, true);
-    view.setUint16(12, now.day, true);
-    view.setUint32(14, crc, true);
-    view.setUint32(18, data.length, true);
-    view.setUint32(22, data.length, true);
-    view.setUint16(26, name.length, true);
-    local.set(name, 30);
-    parts.push(local, data);
-
-    const header = new Uint8Array(46 + name.length);
-    const centralView = new DataView(header.buffer);
-    centralView.setUint32(0, 0x02014b50, true);
-    centralView.setUint16(4, 20, true);
-    centralView.setUint16(6, 20, true);
-    centralView.setUint16(12, now.time, true);
-    centralView.setUint16(14, now.day, true);
-    centralView.setUint32(16, crc, true);
-    centralView.setUint32(20, data.length, true);
-    centralView.setUint32(24, data.length, true);
-    centralView.setUint16(28, name.length, true);
-    centralView.setUint32(42, offset, true);
-    header.set(name, 46);
-    central.push(header);
-    offset += local.length + data.length;
-  }
-
-  const centralSize = central.reduce((sum, part) => sum + part.length, 0);
-  const end = new Uint8Array(22);
-  const endView = new DataView(end.buffer);
-  endView.setUint32(0, 0x06054b50, true);
-  endView.setUint16(8, files.length, true);
-  endView.setUint16(10, files.length, true);
-  endView.setUint32(12, centralSize, true);
-  endView.setUint32(16, offset, true);
-
-  return new Blob([...parts, ...central, end], { type: "application/zip" });
+  return "JPG";
 }
 
 function outputMeta(format) {
@@ -306,19 +329,40 @@ function outputMeta(format) {
   return { mime: "image/jpeg", extension: "jpg" };
 }
 
+function isSupportedImage(file) {
+  return (
+    /^image\/(jpeg|jpg|png|webp)$/.test(file.type) ||
+    /\.(jpe?g|png|webp)$/i.test(file.name)
+  );
+}
+
+function revokeImageUrls(image) {
+  URL.revokeObjectURL(image.url);
+  previewCache.delete(image.url);
+
+  if (image.outputUrl) {
+    URL.revokeObjectURL(image.outputUrl);
+  }
+}
+
 function ImageResizer() {
   const inputRef = useRef(null);
+  const imagesRef = useRef([]);
   const [images, setImages] = useState([]);
   const [screen, setScreen] = useState("upload");
   const [mode, setMode] = useState("size");
   const [width, setWidth] = useState(1080);
   const [height, setHeight] = useState(1080);
+  const [lockAspect, setLockAspect] = useState(true);
+  // Until the user picks a size, every image keeps its own original size.
+  const [sizeTouched, setSizeTouched] = useState(false);
   const [percent, setPercent] = useState(100);
   const [aspect, setAspect] = useState("original");
+  const [aspectFit, setAspectFit] = useState("cover");
   const [rotation, setRotation] = useState(0);
   const [flipH, setFlipH] = useState(false);
   const [flipV, setFlipV] = useState(false);
-  const [format, setFormat] = useState("JPG");
+  const [format, setFormat] = useState("ORIGINAL");
   const [quality, setQuality] = useState(100);
   const [message, setMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -327,8 +371,13 @@ function ImageResizer() {
   const [processingLabel, setProcessingLabel] = useState("");
   const [processingProgress, setProcessingProgress] = useState(0);
   const [zipping, setZipping] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
 
   const editorOpen = images.length > 0 && screen === "editor";
+
+  useEffect(() => {
+    imagesRef.current = images;
+  }, [images]);
 
   useEffect(() => {
     document.body.classList.toggle("hide-site-footer", editorOpen);
@@ -339,17 +388,41 @@ function ImageResizer() {
     };
   }, [editorOpen]);
 
+  // Open each screen at the top (on phones the old scroll position was kept).
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  }, [screen]);
+
+  // Free every object URL when the user leaves the page.
+  useEffect(() => {
+    return () => {
+      imagesRef.current.forEach(revokeImageUrls);
+    };
+  }, []);
+
   const reference = images[0];
 
+  function rotatedBase(image, turn = rotation) {
+    const swapped = turn % 180 !== 0;
+
+    return {
+      width: swapped ? image.height : image.width,
+      height: swapped ? image.width : image.height,
+    };
+  }
+
+  const referenceBase = reference ? rotatedBase(reference) : null;
+  const referenceRatio = referenceBase
+    ? referenceBase.width / referenceBase.height
+    : 1;
+
   function targetFor(image) {
-    const swapped = rotation % 180 !== 0;
-    const baseWidth = swapped ? image.height : image.width;
-    const baseHeight = swapped ? image.width : image.height;
+    const base = rotatedBase(image);
 
     if (mode === "percent") {
       return {
-        width: clamp((baseWidth * percent) / 100),
-        height: clamp((baseHeight * percent) / 100),
+        width: clampSide((base.width * percent) / 100),
+        height: clampSide((base.height * percent) / 100),
         fit: "fill",
       };
     }
@@ -358,167 +431,258 @@ function ImageResizer() {
       const selected = ASPECTS.find((item) => item.id === aspect);
 
       if (!selected || selected.id === "original") {
-        return { width: baseWidth, height: baseHeight, fit: "fill" };
+        return { width: base.width, height: base.height, fit: "fill" };
       }
 
-      return { width: selected.width, height: selected.height, fit: "contain" };
+      return { width: selected.width, height: selected.height, fit: aspectFit };
     }
 
-    const nextWidth = clamp(width || baseWidth);
-    const nextHeight = clamp(height || baseHeight);
+    if (!sizeTouched) {
+      return { width: base.width, height: base.height, fit: "fill" };
+    }
 
-    return {
-      width: nextWidth,
-      height: nextHeight,
-      fit: "fill",
-    };
+    const boxWidth = clampSide(width);
+    const boxHeight = clampSide(height);
+
+    if (lockAspect) {
+      // Fit inside the box without stretching. Each image keeps its own
+      // shape, so a batch of portrait and landscape photos stays correct.
+      const fit = Math.min(boxWidth / base.width, boxHeight / base.height);
+
+      return {
+        width: clampSide(base.width * fit),
+        height: clampSide(base.height * fit),
+        fit: "fill",
+      };
+    }
+
+    return { width: boxWidth, height: boxHeight, fit: "fill" };
   }
 
   function updateWidth(value) {
-    setWidth(Math.max(1, Number(value) || 1));
+    setSizeTouched(true);
+    setWidth(value);
+
+    if (lockAspect && referenceBase) {
+      setHeight(clampSide(value / referenceRatio));
+    }
   }
 
   function updateHeight(value) {
-    setHeight(Math.max(1, Number(value) || 1));
+    setSizeTouched(true);
+    setHeight(value);
+
+    if (lockAspect && referenceBase) {
+      setWidth(clampSide(value * referenceRatio));
+    }
+  }
+
+  function toggleLock() {
+    const next = !lockAspect;
+    setLockAspect(next);
+
+    if (next && referenceBase) {
+      setHeight(clampSide(width / referenceRatio));
+    }
+  }
+
+  // A 90° turn swaps the output sides too, otherwise the photo is squashed.
+  function rotate(delta) {
+    setRotation((current) => (current + delta + 360) % 360);
+    setWidth(height);
+    setHeight(width);
   }
 
   async function addImages(fileList) {
-    const files = [...fileList].filter((file) =>
-      /^image\/(jpeg|jpg|png|webp)$/.test(file.type) ||
-      /\.(jpe?g|png|webp)$/i.test(file.name)
-    );
-    const rejected = fileList.length - files.length;
-
-    if (!files.length) {
-      setMessage("Use JPG, PNG, or WebP images.");
+    if (isReading) {
       return;
     }
 
-    setMessage(
-      rejected ? `${rejected} file${rejected === 1 ? "" : "s"} skipped. Use JPG, PNG, or WebP.` : ""
-    );
+    const all = [...(fileList || [])];
+
+    if (!all.length) {
+      return;
+    }
+
+    const accepted = all.filter(isSupportedImage);
+    const problems = [];
+    const skipped = all.length - accepted.length;
+
+    if (skipped) {
+      problems.push(
+        `${skipped} file${skipped === 1 ? "" : "s"} skipped. Use JPG, PNG, or WebP.`
+      );
+    }
+
+    const prepared = [];
     setIsReading(true);
 
     try {
-      const prepared = [];
-
-      for (const file of files) {
-        if (file.size > 30 * 1024 * 1024) {
-          setMessage(`${file.name} is larger than 30 MB.`);
+      for (const file of accepted) {
+        if (file.size > MAX_IMAGE_BYTES) {
+          problems.push(`${file.name} is larger than 30 MB.`);
           continue;
         }
 
         const url = URL.createObjectURL(file);
-        const element = await loadImage(url);
-        prepared.push({
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          file,
-          name: file.name,
-          url,
-          width: element.naturalWidth,
-          height: element.naturalHeight,
-          status: "ready",
-          progress: 0,
-          outputUrl: "",
-          outputName: "",
-          outputSize: 0,
-          error: "",
-        });
-      }
 
-      if (!prepared.length) {
-        return;
-      }
+        // One broken file no longer cancels the whole batch.
+        try {
+          const element = await loadImage(url);
+          const size = sourceSize(element);
 
-      setImages((current) => {
-        const next = [...current, ...prepared];
-
-        if (!current.length) {
-          setWidth(prepared[0].width);
-          setHeight(prepared[0].height);
-          setScreen("editor");
+          prepared.push({
+            id: makeId(),
+            file,
+            name: file.name,
+            url,
+            width: size.width,
+            height: size.height,
+            status: "ready",
+            progress: 0,
+            outputUrl: "",
+            outputName: "",
+            outputSize: 0,
+            blob: null,
+            error: "",
+          });
+        } catch {
+          URL.revokeObjectURL(url);
+          problems.push(`${file.name} could not be read.`);
         }
-
-        return next;
-      });
+      }
     } finally {
       setIsReading(false);
       setIsDragging(false);
     }
+
+    setMessage(problems.join(" "));
+
+    if (!prepared.length) {
+      return;
+    }
+
+    const wasEmpty = imagesRef.current.length === 0;
+    const next = [...imagesRef.current, ...prepared];
+    imagesRef.current = next;
+    setImages(next);
+
+    if (wasEmpty) {
+      setSizeTouched(false);
+      const base = rotatedBase(prepared[0]);
+      setWidth(clampSide(base.width));
+      setHeight(clampSide(base.height));
+      setScreen("editor");
+    }
   }
 
   function removeImage(id) {
-    setImages((current) => {
-      const image = current.find((item) => item.id === id);
+    if (isProcessing) {
+      return;
+    }
 
-      if (image) {
-        URL.revokeObjectURL(image.url);
+    setSelectedIds((previous) => previous.filter((item) => item !== id));
+    const image = imagesRef.current.find((item) => item.id === id);
 
-        if (image.outputUrl) {
-          URL.revokeObjectURL(image.outputUrl);
-        }
-      }
+    if (!image) {
+      return;
+    }
 
-      const next = current.filter((item) => item.id !== id);
+    revokeImageUrls(image);
 
-      if (!next.length) {
-        setScreen("upload");
-      }
+    const next = imagesRef.current.filter((item) => item.id !== id);
+    imagesRef.current = next;
+    setImages(next);
 
-      return next;
-    });
+    if (!next.length) {
+      setScreen("upload");
+    }
   }
 
   function clearImages() {
-    images.forEach((image) => {
-      URL.revokeObjectURL(image.url);
-
-      if (image.outputUrl) {
-        URL.revokeObjectURL(image.outputUrl);
-      }
-    });
+    imagesRef.current.forEach(revokeImageUrls);
+    imagesRef.current = [];
     setImages([]);
     setScreen("upload");
     setMessage("");
+    setSelectedIds([]);
   }
 
   function resetSettings() {
     setMode("size");
     setPercent(100);
     setAspect("original");
+    setAspectFit("cover");
     setRotation(0);
     setFlipH(false);
     setFlipV(false);
-    setFormat("JPG");
+    setFormat("ORIGINAL");
     setQuality(100);
+    setLockAspect(true);
+    setSizeTouched(false);
 
     if (reference) {
-      setWidth(reference.width);
-      setHeight(reference.height);
+      setWidth(clampSide(reference.width));
+      setHeight(clampSide(reference.height));
     }
   }
 
   async function renderImage(image) {
-    const source = await loadImage(image.url);
     const target = targetFor(image);
+    const outFormat = resolveFormat(format, image);
+    const meta = outputMeta(outFormat);
+    // Avoid names like photo_resized_resized.jpg when re-resizing a file.
+    const base = image.name.replace(/\.[^.]+$/, "").replace(/(_resized)+$/i, "");
+
+    // Nothing changed (same size, no rotate/flip, same format):
+    // return the original file byte-for-byte, so there is zero quality loss.
+    const unchanged =
+      target.width === image.width &&
+      target.height === image.height &&
+      rotation === 0 &&
+      !flipH &&
+      !flipV &&
+      outFormat === resolveFormat("ORIGINAL", image);
+
+    if (unchanged) {
+      const blob = image.file;
+
+      return {
+        outputUrl: URL.createObjectURL(blob),
+        outputName: `${base}_resized.${meta.extension}`,
+        outputSize: blob.size,
+        blob,
+      };
+    }
+
+    const source = await loadImage(image.url);
     const output = document.createElement("canvas");
     output.width = target.width;
     output.height = target.height;
+
     drawEditedImage(
       source,
-      { rotation, flipH, flipV, fit: target.fit, format },
+      { rotation, flipH, flipV, fit: target.fit, format: outFormat },
       output
     );
-    const meta = outputMeta(format);
+
     const blob = await new Promise((resolve) => {
       output.toBlob(resolve, meta.mime, quality / 100);
     });
 
     if (!blob) {
-      throw new Error("This browser could not export that format.");
+      // Usually the canvas size limit (about 16 megapixels on iPhone/iPad).
+      throw new Error(
+        `${target.width} × ${target.height} is too large for this browser. Try a smaller size.`
+      );
     }
 
-    const base = image.name.replace(/\.[^.]+$/, "");
+    if (blob.type && blob.type !== meta.mime) {
+      // Safari cannot encode WebP and quietly returns a PNG instead.
+      throw new Error(
+        `This browser cannot save ${outFormat === "WEBP" ? "WebP" : outFormat}. Choose JPG or PNG.`
+      );
+    }
 
     return {
       outputUrl: URL.createObjectURL(blob),
@@ -529,17 +693,43 @@ function ImageResizer() {
   }
 
   async function resizeAll() {
-    if (!images.length || isProcessing) {
+    if (!images.length || isProcessing || isReading) {
       return;
     }
 
+    const batch = imagesRef.current;
+
+    // Free the files from the previous run before making new ones.
+    batch.forEach((image) => {
+      if (image.outputUrl) {
+        URL.revokeObjectURL(image.outputUrl);
+      }
+    });
+
+    setImages((current) =>
+      current.map((item) => ({
+        ...item,
+        status: "waiting",
+        progress: 0,
+        outputUrl: "",
+        outputName: "",
+        outputSize: 0,
+        blob: null,
+        error: "",
+      }))
+    );
+
     setScreen("results");
+    setMessage("");
+    setSelectedIds([]);
     setIsProcessing(true);
     setProcessingProgress(0);
 
-    for (let index = 0; index < images.length; index += 1) {
-      const image = images[index];
-      setProcessingLabel(`Resizing ${index + 1} of ${images.length}: ${image.name}`);
+    const doneIds = [];
+
+    for (let index = 0; index < batch.length; index += 1) {
+      const image = batch[index];
+      setProcessingLabel(`Resizing ${index + 1} of ${batch.length}: ${image.name}`);
       setImages((current) =>
         current.map((item) =>
           item.id === image.id
@@ -553,18 +743,11 @@ function ImageResizer() {
         setImages((current) =>
           current.map((item) =>
             item.id === image.id
-              ? {
-                  ...item,
-                  status: "done",
-                  progress: 100,
-                  outputUrl: result.outputUrl,
-                  outputName: result.outputName,
-                  outputSize: result.outputSize,
-                  blob: result.blob,
-                }
+              ? { ...item, status: "done", progress: 100, ...result }
               : item
           )
         );
+        doneIds.push(image.id);
       } catch (error) {
         setImages((current) =>
           current.map((item) =>
@@ -580,60 +763,111 @@ function ImageResizer() {
         );
       }
 
-      setProcessingProgress(Math.round(((index + 1) / images.length) * 100));
+      setProcessingProgress(Math.round(((index + 1) / batch.length) * 100));
     }
 
+    // Every finished image starts ticked.
+    setSelectedIds(doneIds);
     setIsProcessing(false);
     setProcessingLabel("");
   }
 
   function downloadOne(image) {
-    if (!image.outputUrl) {
-      return;
+    if (image.outputUrl) {
+      downloadUrl(image.outputUrl, image.outputName || image.name);
     }
-
-    const link = document.createElement("a");
-    link.href = image.outputUrl;
-    link.download = image.outputName || image.name;
-    link.click();
   }
 
-  async function downloadZip() {
-    const ready = images.filter((image) => image.status === "done" && image.blob);
+  async function downloadZip(list, zipName) {
+    const ready = list.filter((image) => image.blob);
 
     if (!ready.length || zipping) {
       return;
     }
 
     setZipping(true);
+    setMessage("");
 
     try {
-      const zip = await buildZip(
-        ready.map((image) => ({
-          name: image.outputName,
-          blob: image.blob,
-        }))
+      const zip = await createZip(
+        ready.map((image) => ({ name: image.outputName, blob: image.blob }))
       );
-      const url = URL.createObjectURL(zip);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "resizepro-images.zip";
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      downloadBlob(zip, zipName);
+    } catch (error) {
+      setMessage(error.message || "Could not create the ZIP file.");
     } finally {
       setZipping(false);
     }
   }
 
-  function downloadSeparately() {
-    images
-      .filter((image) => image.status === "done" && image.outputUrl)
-      .forEach((image, index) => {
-        setTimeout(() => downloadOne(image), index * 250);
-      });
+  function downloadSeparately(list) {
+    downloadMany(list.map((image) => ({ url: image.outputUrl, name: image.outputName })));
   }
 
-  const readyCount = images.filter((image) => image.status === "done").length;
+  const readyImages = images.filter((image) => image.status === "done" && image.outputUrl);
+  const selectedImages = readyImages.filter((image) => selectedIds.includes(image.id));
+  const allReadySelected =
+    readyImages.length > 0 && selectedImages.length === readyImages.length;
+
+  function toggleSelected(id) {
+    setSelectedIds((previous) =>
+      previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id]
+    );
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds(allReadySelected ? [] : readyImages.map((image) => image.id));
+  }
+
+  const resultItems = images.map((image) => {
+    const ready = image.status === "done" && Boolean(image.outputUrl);
+
+    return {
+      id: image.id,
+      name: image.outputName || image.name,
+      thumb: image.outputUrl || image.url,
+      bytes: ready ? image.outputSize : 0,
+      type: image.outputName
+        ? image.outputName.split(".").pop().toUpperCase()
+        : resolveFormat(format, image),
+      state:
+        image.status === "processing"
+          ? "processing"
+          : image.status === "error"
+            ? "error"
+            : ready
+              ? "done"
+              : isProcessing
+                ? "waiting"
+                : "idle",
+      progress: image.progress,
+      error: image.error,
+      ready,
+    };
+  });
+
+  const openPicker = () => {
+    if (!isReading) {
+      inputRef.current?.click();
+    }
+  };
+
+  const dropHandlers = {
+    onDragOver: (event) => {
+      event.preventDefault();
+      setIsDragging(true);
+    },
+    onDragLeave: (event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) {
+        setIsDragging(false);
+      }
+    },
+    onDrop: (event) => {
+      event.preventDefault();
+      setIsDragging(false);
+      addImages(event.dataTransfer.files);
+    },
+  };
 
   return (
     <main className="image-page">
@@ -665,34 +899,37 @@ function ImageResizer() {
           </header>
 
           <section className="image-upload-section">
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
+              aria-label="Choose images to resize"
+              aria-busy={isReading}
               className={`image-drop-zone ${isDragging ? "dragging" : ""} ${
                 isReading ? "uploading" : ""
               }`}
-              onClick={() => inputRef.current?.click()}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget)) {
-                  setIsDragging(false);
+              onClick={openPicker}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  openPicker();
                 }
               }}
-              onDrop={(event) => {
-                event.preventDefault();
-                addImages(event.dataTransfer.files);
-              }}
+              {...dropHandlers}
             >
-              <span className="image-upload-icon">+</span>
+              <span className="image-upload-icon" aria-hidden="true">
+                +
+              </span>
               <h2>{isReading ? "Reading images..." : "Drop images here"}</h2>
               <p>
                 or <span>browse</span> from your computer
               </p>
-              <span className="image-formats">JPG · PNG · WEBP</span>
-            </button>
-            {message && <p className="image-message">{message}</p>}
+              <span className="image-formats">JPG · PNG · WEBP · up to 30 MB</span>
+            </div>
+            {message && (
+              <p className="image-message" role="alert">
+                {message}
+              </p>
+            )}
           </section>
 
           <section className="image-feature-section">
@@ -715,21 +952,25 @@ function ImageResizer() {
               <span className="image-count">
                 {images.length} {images.length === 1 ? "FILE" : "FILES"}
               </span>
-              <button type="button" onClick={() => inputRef.current?.click()}>
+              <button type="button" onClick={openPicker} disabled={isReading}>
                 <span className="image-plus">+</span>
                 Add images
               </button>
-              <button type="button" onClick={clearImages}>
+              <button type="button" onClick={clearImages} disabled={isReading}>
                 Clear
               </button>
             </div>
             <span className="image-ready">
               <i />
-              Ready to resize
+              {isReading ? "Reading images..." : "Ready to resize"}
             </span>
           </div>
 
-          {message && <p className="image-message toolbar-message">{message}</p>}
+          {message && (
+            <p className="image-message toolbar-message" role="alert">
+              {message}
+            </p>
+          )}
 
           <div className="image-layout">
             <aside className="image-settings">
@@ -762,12 +1003,10 @@ function ImageResizer() {
                       <label>
                         Width
                         <span>
-                          <input
-                            type="number"
-                            min="1"
-                            max="8000"
+                          <NumberField
+                            label="Width in pixels"
                             value={width}
-                            onChange={(event) => updateWidth(event.target.value)}
+                            onCommit={updateWidth}
                           />
                           px
                         </span>
@@ -775,35 +1014,51 @@ function ImageResizer() {
                       <label>
                         Height
                         <span>
-                          <input
-                            type="number"
-                            min="1"
-                            max="8000"
+                          <NumberField
+                            label="Height in pixels"
                             value={height}
-                            onChange={(event) => updateHeight(event.target.value)}
+                            onCommit={updateHeight}
                           />
                           px
                         </span>
                       </label>
                     </div>
+
+                    <label className="image-lock">
+                      <input
+                        type="checkbox"
+                        checked={lockAspect}
+                        onChange={toggleLock}
+                      />
+                      Keep aspect ratio (no stretching)
+                    </label>
+
+                    {!sizeTouched && (
+                      <p className="image-transform-note">
+                        Each image keeps its original size. Type a size or pick
+                        a preset to change it.
+                      </p>
+                    )}
+
+                    {sizeTouched && lockAspect && images.length > 1 && (
+                      <p className="image-transform-note">
+                        Each image fits inside {width} × {height} and keeps its
+                        own shape.
+                      </p>
+                    )}
+
                     <p className="image-mini-label">Quick presets</p>
                     <div className="image-preset-row">
                       <button
                         type="button"
-                        className={
-                          reference &&
-                          width === reference.width &&
-                          height === reference.height
-                            ? "active"
-                            : ""
-                        }
+                        className={!sizeTouched ? "active" : ""}
                         onClick={() => {
-                          if (!reference) {
-                            return;
-                          }
+                          setSizeTouched(false);
 
-                          setWidth(reference.width);
-                          setHeight(reference.height);
+                          if (referenceBase) {
+                            setWidth(clampSide(referenceBase.width));
+                            setHeight(clampSide(referenceBase.height));
+                          }
                         }}
                       >
                         Original
@@ -813,16 +1068,19 @@ function ImageResizer() {
                           key={preset.label}
                           type="button"
                           className={
-                            width === preset.width && height === preset.height
+                            sizeTouched &&
+                            width === preset.width &&
+                            height === preset.height
                               ? "active"
                               : ""
                           }
                           onClick={() => {
+                            setSizeTouched(true);
                             setWidth(preset.width);
                             setHeight(preset.height);
                           }}
                         >
-                          {preset.width} × {preset.height}
+                          {preset.label}
                         </button>
                       ))}
                     </div>
@@ -841,6 +1099,7 @@ function ImageResizer() {
                       min="10"
                       max="200"
                       value={percent}
+                      aria-label="Scale percent"
                       onChange={(event) => setPercent(Number(event.target.value))}
                       style={{ "--slider-fill": `${((percent - 10) / 190) * 100}%` }}
                     />
@@ -866,6 +1125,28 @@ function ImageResizer() {
                         </button>
                       ))}
                     </div>
+
+                    {aspect !== "original" && (
+                      <>
+                        <p className="image-mini-label">Fit</p>
+                        <div className="image-format-row">
+                          <button
+                            type="button"
+                            className={aspectFit === "cover" ? "active" : ""}
+                            onClick={() => setAspectFit("cover")}
+                          >
+                            Crop to fill
+                          </button>
+                          <button
+                            type="button"
+                            className={aspectFit === "contain" ? "active" : ""}
+                            onClick={() => setAspectFit("contain")}
+                          >
+                            Fit with bars
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -875,14 +1156,14 @@ function ImageResizer() {
                     <button
                       type="button"
                       aria-label="Rotate left"
-                      onClick={() => setRotation((current) => (current + 270) % 360)}
+                      onClick={() => rotate(-90)}
                     >
                       <Icon name="rotate-left" />
                     </button>
                     <button
                       type="button"
                       aria-label="Rotate right"
-                      onClick={() => setRotation((current) => (current + 90) % 360)}
+                      onClick={() => rotate(90)}
                     >
                       <Icon name="rotate-right" />
                     </button>
@@ -890,6 +1171,7 @@ function ImageResizer() {
                       type="button"
                       className={flipH ? "active" : ""}
                       aria-label="Flip horizontal"
+                      aria-pressed={flipH}
                       onClick={() => setFlipH((current) => !current)}
                     >
                       <Icon name="flip-h" />
@@ -898,6 +1180,7 @@ function ImageResizer() {
                       type="button"
                       className={flipV ? "active" : ""}
                       aria-label="Flip vertical"
+                      aria-pressed={flipV}
                       onClick={() => setFlipV((current) => !current)}
                     >
                       <Icon name="flip-v" />
@@ -912,14 +1195,14 @@ function ImageResizer() {
                 <div className="image-setting-group">
                   <h3>Output format</h3>
                   <div className="image-format-row">
-                    {["JPG", "PNG", "WEBP"].map((item) => (
+                    {["ORIGINAL", "JPG", "PNG", "WEBP"].map((item) => (
                       <button
                         key={item}
                         type="button"
                         className={format === item ? "active" : ""}
                         onClick={() => setFormat(item)}
                       >
-                        {item === "WEBP" ? "WebP" : item}
+                        {item === "WEBP" ? "WebP" : item === "ORIGINAL" ? "Original" : item}
                       </button>
                     ))}
                   </div>
@@ -928,7 +1211,9 @@ function ImageResizer() {
                 <div className="image-setting-group">
                   <div className="image-title-row">
                     <h3>Quality</h3>
-                    <strong>{format === "PNG" ? "Full" : `${quality}%`}</strong>
+                    <strong>
+                      {format === "PNG" ? "Full" : quality === 100 ? "Original (100%)" : `${quality}%`}
+                    </strong>
                   </div>
                   <input
                     className="image-slider"
@@ -936,14 +1221,19 @@ function ImageResizer() {
                     min="40"
                     max="100"
                     value={quality}
+                    aria-label="Quality"
                     disabled={format === "PNG"}
                     onChange={(event) => setQuality(Number(event.target.value))}
                     style={{ "--slider-fill": `${((quality - 40) / 60) * 100}%` }}
                   />
                   <div className="image-slider-labels">
                     <span>Smaller file</span>
-                    <span>Higher quality</span>
+                    <span>Original quality</span>
                   </div>
+                  <p className="image-transform-note">
+                    PNG is always lossless. Images you do not change are kept
+                    exactly as uploaded.
+                  </p>
                 </div>
 
                 <button type="button" className="image-reset" onClick={resetSettings}>
@@ -966,19 +1256,7 @@ function ImageResizer() {
 
             <div
               className={`image-workspace ${isDragging ? "dropping" : ""}`}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget)) {
-                  setIsDragging(false);
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                addImages(event.dataTransfer.files);
-              }}
+              {...dropHandlers}
             >
               <div className="image-workspace-head">
                 <div>
@@ -1004,7 +1282,7 @@ function ImageResizer() {
                             flipH={flipH}
                             flipV={flipV}
                             fit={target.fit}
-                            format={format}
+                            format={resolveFormat(format, image)}
                             targetWidth={target.width}
                             targetHeight={target.height}
                             zoom={mode === "percent" ? percent / 100 : 1}
@@ -1033,7 +1311,8 @@ function ImageResizer() {
                   <button
                     type="button"
                     className="image-add-card"
-                    onClick={() => inputRef.current?.click()}
+                    onClick={openPicker}
+                    disabled={isReading}
                   >
                     <span>+</span>
                     <strong>{isDragging ? "Drop images" : "Add images"}</strong>
@@ -1046,103 +1325,31 @@ function ImageResizer() {
         </section>
       )}
 
-      {screen === "results" && (
-        <section className="image-results">
-          {isProcessing && (
-            <div className="image-results-banner">
-              <span>{processingLabel}</span>
-              <strong>{processingProgress}%</strong>
-              <div>
-                <i style={{ width: `${processingProgress}%` }} />
-              </div>
-            </div>
-          )}
-
-          <div className="image-results-toolbar">
-            <button
-              type="button"
-              disabled={!readyCount || zipping}
-              onClick={downloadZip}
-            >
-              <Icon name="download" />
-              {zipping ? "Preparing ZIP..." : "Download all as ZIP"}
-            </button>
-            <button
-              type="button"
-              disabled={!readyCount}
-              onClick={downloadSeparately}
-            >
-              <Icon name="download" />
-              Download all separately
-            </button>
-          </div>
-
-          <div className="image-results-table">
-            <div className="image-results-head">
-              <span>Name</span>
-              <span>Size</span>
-              <span>Type</span>
-              <span>Status</span>
-              <span />
-            </div>
-            <div className="image-results-body">
-              {images.map((image) => (
-                <div key={image.id} className="image-results-row">
-                  <div className="image-results-file">
-                    <img src={image.outputUrl || image.url} alt="" />
-                    <strong>{image.outputName || image.name}</strong>
-                  </div>
-                  <span>{formatBytes(image.outputSize)}</span>
-                  <em>{format}</em>
-                  <span
-                    className={
-                      image.status === "done"
-                        ? "image-results-done"
-                        : image.status === "error"
-                          ? "image-results-error"
-                          : "image-results-progress"
-                    }
-                  >
-                    {image.status === "done"
-                      ? "✓"
-                      : image.status === "error"
-                        ? image.error
-                        : image.status === "processing"
-                          ? `${image.progress}%`
-                          : "Waiting"}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={image.status !== "done"}
-                    onClick={() => downloadOne(image)}
-                    aria-label={`Download ${image.name}`}
-                  >
-                    <Icon name="download" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="image-results-footer">
-            <button
-              type="button"
-              disabled={isProcessing}
-              onClick={() => setScreen("editor")}
-            >
-              <Icon name="back" />
-              Edit settings
-            </button>
-            <button
-              type="button"
-              className="image-new-batch"
-              disabled={isProcessing}
-              onClick={clearImages}
-            >
-              Start new batch
-            </button>
-          </div>
-        </section>
+      {screen === "results" && images.length > 0 && (
+        <ResultsPanel
+          noun="image"
+          items={resultItems}
+          isProcessing={isProcessing}
+          progress={processingProgress}
+          statusMessage={processingLabel}
+          errorMessage={message}
+          selectedIds={selectedIds}
+          onToggle={toggleSelected}
+          onToggleAll={toggleSelectAll}
+          onDownload={(id) => downloadOne(images.find((image) => image.id === id))}
+          onRemove={removeImage}
+          onZipSelected={() => downloadZip(selectedImages, "resizepro-selected.zip")}
+          onZipAll={() => downloadZip(readyImages, "resizepro-images.zip")}
+          onDownloadSeparately={() =>
+            downloadSeparately(selectedImages.length ? selectedImages : readyImages)
+          }
+          zipping={zipping}
+          onEdit={() => {
+            setMessage("");
+            setScreen("editor");
+          }}
+          onNewBatch={clearImages}
+        />
       )}
     </main>
   );

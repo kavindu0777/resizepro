@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import {
   ArrowRight,
   BadgeCheck,
-  Image,
+  Image as ImageIcon,
   MonitorSmartphone,
   Play,
   ShieldCheck,
@@ -72,7 +72,7 @@ function Home() {
 
             <article className="tool-card home-image-card">
               <div className="tool-icon">
-                <Image size={30} strokeWidth={1.75} />
+                <ImageIcon size={30} strokeWidth={1.75} />
               </div>
               <h2>Image Resizer</h2>
               <p>Resize, crop, and optimize your images in just a few clicks.</p>

@@ -1,12 +1,16 @@
+/* Only the weights the site actually uses (300–800). Loading all 18 was slow. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap');
 
-@import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
-
+:root {
+  /* Navbar.jsx updates this with the real navbar height (it wraps on tablets). */
+  --nav-height: 78px;
+}
 
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
-  font-family:poppins;
+  font-family: "Poppins", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 html {
@@ -14,13 +18,9 @@ html {
 }
 
 body {
-  
-
-  background: #ffffff;
-
-  color: #151a24;
-
   min-width: 320px;
+  background: #ffffff;
+  color: #151a24;
 }
 
 button,
@@ -29,15 +29,39 @@ select,
 textarea {
   font-family: inherit;
 }
-html {
-  scrollbar-width: none;
-}
 
-html::-webkit-scrollbar {
+/* Used by both resizer pages while their editor is open.
+   It lives here so it works no matter which page CSS is loaded. */
+body.hide-site-footer .footer {
   display: none;
 }
 
-body {
-  scrollbar-width: none;
+/* Placeholder, FAQ, Privacy and 404 pages */
+.placeholder-page {
+  width: min(720px, calc(100% - 48px));
+  min-height: 50vh;
+  margin: 0 auto;
+  padding: 80px 0;
+  text-align: center;
 }
 
+.placeholder-page h1 {
+  font-size: 36px;
+  font-weight: 700;
+}
+
+.placeholder-page p {
+  margin-top: 12px;
+  color: #50555f;
+}
+
+.placeholder-link {
+  display: inline-block;
+  margin-top: 24px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: #ffc400;
+  color: #151a24;
+  font-weight: 600;
+  text-decoration: none;
+}

@@ -1,0 +1,552 @@
+/* =========================================================
+   SHARED RESULTS PANEL (image + video)
+========================================================= */
+
+.rp {
+  width: min(1320px, calc(100% - 48px));
+  margin: 28px auto 56px;
+  color: #151a24;
+  overflow-anchor: none;
+}
+
+.rp-icon {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  display: block;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---------- Buttons ---------- */
+
+.rp-btn {
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 18px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.rp-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rp-btn-primary {
+  border: 0;
+  background: #ffc400;
+  color: #151a24;
+}
+
+.rp-btn-primary:hover:not(:disabled) {
+  background: #f5b800;
+}
+
+.rp-btn-outline {
+  border: 1px solid #e3e3e3;
+  background: #ffffff;
+  color: #151a24;
+}
+
+.rp-btn-outline:hover:not(:disabled) {
+  border-color: #e4c85a;
+  background: #fffdf3;
+}
+
+.rp-btn-dark {
+  border: 0;
+  background: #151a24;
+  color: #ffffff;
+}
+
+.rp-btn-dark:hover:not(:disabled) {
+  background: #2a3140;
+}
+
+.rp-icon-btn {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid #e6e6e6;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #151a24;
+  cursor: pointer;
+}
+
+.rp-icon-btn:hover:not(:disabled) {
+  border-color: #e4c85a;
+  background: #fffdf3;
+}
+
+.rp-icon-btn.is-danger:hover:not(:disabled) {
+  border-color: #e0aaaa;
+  background: #fff7f7;
+  color: #b55b5b;
+}
+
+.rp-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ---------- Checkbox ---------- */
+
+.rp-check {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  display: inline-grid;
+  place-content: center;
+  flex-shrink: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1.5px solid #cfcfcf;
+  border-radius: 6px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.rp-check::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  transform: scale(0);
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  background: #151a24;
+}
+
+.rp-check:checked,
+.rp-check:indeterminate {
+  border-color: #ffc400;
+  background: #ffc400;
+}
+
+.rp-check:checked::before {
+  transform: scale(1);
+}
+
+.rp-check:indeterminate::before {
+  height: 2px;
+  clip-path: none;
+  transform: scale(1);
+}
+
+.rp-check:focus-visible {
+  outline: 3px solid rgba(225, 183, 0, 0.35);
+  outline-offset: 2px;
+}
+
+.rp-check:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ---------- Status banner ---------- */
+
+.rp-status {
+  padding: 14px 18px;
+  border: 1px solid #ececec;
+  border-radius: 14px;
+  background: #fafafa;
+}
+
+.rp-status.is-busy {
+  border-color: #f3e3a2;
+  background: #fff8dc;
+}
+
+.rp-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rp-status-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rp-status-text strong {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rp-status-text span {
+  color: #6b6b6b;
+  font-size: 12px;
+}
+
+.rp-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rp-percent {
+  color: #7a6500;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.rp-overall {
+  height: 6px;
+  margin-top: 10px;
+}
+
+.rp-alert {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fff1f1;
+  color: #a04444;
+  font-size: 13px;
+}
+
+/* ---------- Table ---------- */
+
+.rp-card {
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid #e6e6e6;
+  border-radius: 16px;
+  background: #ffffff;
+}
+
+.rp-head,
+.rp-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 96px 80px 140px 88px;
+  align-items: center;
+  gap: 14px;
+}
+
+.rp-head {
+  padding: 14px 18px;
+  background: #f3f3f3;
+  color: #555555;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rp-head-mobile {
+  display: none;
+}
+
+.rp-head-actions {
+  text-align: right;
+}
+
+.rp-body {
+  max-height: 460px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rp-row {
+  min-height: 72px;
+  padding: 12px 18px;
+  border-top: 1px solid #efefef;
+  background: #ffffff;
+}
+
+.rp-row.is-selected {
+  background: #fffaea;
+}
+
+.rp-file {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rp-file img,
+.rp-thumb-fallback {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  object-fit: cover;
+  background: #111111;
+}
+
+.rp-thumb-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.rp-file-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rp-file-text strong {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rp-row-error {
+  color: #a04444;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.rp-size {
+  color: #3d3d3d;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rp-type {
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: #fff4c2;
+  color: #6f5b00;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rp-badge {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rp-badge.is-done {
+  background: #e5f6ea;
+  color: #237a44;
+}
+
+.rp-badge.is-stale {
+  background: #fff1c2;
+  color: #725e00;
+}
+
+.rp-badge.is-error {
+  background: #ffe4e4;
+  color: #b04040;
+}
+
+.rp-badge.is-waiting {
+  background: #f1f1f1;
+  color: #666666;
+}
+
+.rp-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rp-progress span {
+  color: #7a6500;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rp-progress-track {
+  flex: 1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #eee7c4;
+}
+
+.rp-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #e1b700;
+  transition: width 0.2s ease;
+}
+
+.rp-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------- Downloads (under the list) ---------- */
+
+.rp-downloads {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 16px 18px;
+  border: 1px solid #f3e3a2;
+  border-radius: 16px;
+  background: #fff8dc;
+}
+
+.rp-downloads-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rp-downloads-info strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.rp-downloads-info span {
+  color: #6b6b6b;
+  font-size: 12px;
+}
+
+.rp-downloads-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* ---------- Footer ---------- */
+
+.rp-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+/* ---------- Tablet ---------- */
+
+@media (max-width: 900px) {
+  .rp-downloads {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .rp-downloads-actions {
+    justify-content: flex-start;
+  }
+}
+
+/* ---------- Phone ---------- */
+
+@media (max-width: 640px) {
+  .rp {
+    width: calc(100% - 32px);
+    margin-top: 20px;
+  }
+
+  .rp-head {
+    grid-template-columns: 24px minmax(0, 1fr);
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 13px;
+  }
+
+  .rp-head-desktop {
+    display: none;
+  }
+
+  .rp-head-mobile {
+    display: inline;
+  }
+
+  .rp-row {
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "check file actions"
+      "check meta meta";
+    row-gap: 8px;
+  }
+
+  .rp-row > .rp-check {
+    grid-area: check;
+    align-self: start;
+    margin-top: 12px;
+  }
+
+  .rp-file {
+    grid-area: file;
+  }
+
+  .rp-actions {
+    grid-area: actions;
+  }
+
+  /* size · type · status on one line under the name */
+  .rp-size,
+  .rp-type,
+  .rp-status-cell {
+    grid-area: meta;
+  }
+
+  .rp-size {
+    justify-self: start;
+  }
+
+  .rp-type {
+    justify-self: start;
+    margin-left: 74px;
+  }
+
+  .rp-status-cell {
+    justify-self: end;
+  }
+
+  .rp-body {
+    max-height: none;
+  }
+
+  .rp-status-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .rp-status-actions {
+    justify-content: space-between;
+  }
+
+  .rp-downloads-actions,
+  .rp-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .rp-btn {
+    width: 100%;
+  }
+}

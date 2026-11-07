@@ -13,10 +13,10 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "jszip": "^3.10.1",
-    "lucide-react": "^1.49.0",
+    "lucide-react": "^1.70.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "react-router-dom": "^7.18.2"
+    "react-router-dom": "^7.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
