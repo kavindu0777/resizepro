@@ -1131,7 +1131,7 @@ function VideoResizer() {
               <span className="video-header-label">VIDEO TOOL</span>
 
               <h1>
-                Resize your <span>video.</span>
+                Resize your <span>video</span>
               </h1>
 
               <p>Resize, scale, change speed, mute audio, and optimize your videos.</p>

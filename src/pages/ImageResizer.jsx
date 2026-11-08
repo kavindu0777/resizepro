@@ -35,7 +35,7 @@ const SIZE_PRESETS = [
 const FEATURES = [
   {
     title: "Exact size",
-    text: "Set the width and height in pixels. Keep the aspect ratio locked so the picture does not stretch.",
+    text: "Export at exactly the width and height you type, like 1620 × 2880. Crop, add bars, or stretch when the shape is different.",
   },
   {
     title: "Percentage scale",
@@ -266,6 +266,37 @@ function PreviewCanvas({
   return <canvas ref={canvasRef} className="image-preview-canvas" />;
 }
 
+const FIT_OPTIONS = [
+  { id: "cover", label: "Crop to fill", hint: "No bars, edges may be cut" },
+  { id: "contain", label: "Fit with bars", hint: "Whole picture, adds bars" },
+  { id: "fill", label: "Stretch", hint: "Whole picture, may look squashed" },
+];
+
+// Used when the photo's shape is different from the chosen frame.
+function FitChoice({ value, onChange }) {
+  const current = FIT_OPTIONS.find((item) => item.id === value) || FIT_OPTIONS[0];
+
+  return (
+    <>
+      <p className="image-mini-label">If the shape is different</p>
+      <div className="image-format-row">
+        {FIT_OPTIONS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={value === item.id ? "active" : ""}
+            aria-pressed={value === item.id}
+            onClick={() => onChange(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <p className="image-transform-note">{current.hint}</p>
+    </>
+  );
+}
+
 // Lets the user clear the box and type a new number.
 // The old input forced "1" the moment it was empty.
 function NumberField({ value, onCommit, label }) {
@@ -358,7 +389,12 @@ function ImageResizer() {
   const [sizeTouched, setSizeTouched] = useState(false);
   const [percent, setPercent] = useState(100);
   const [aspect, setAspect] = useState("original");
-  const [aspectFit, setAspectFit] = useState("cover");
+  // How the picture fills an exact frame whose shape differs from the photo:
+  // "cover" = crop to fill, "contain" = fit with bars, "fill" = stretch.
+  const [frameFit, setFrameFit] = useState("cover");
+  // Width:height ratio that "Lock ratio" keeps while typing.
+  // Stored separately so repeated rounding never drifts the size.
+  const lockRatioRef = useRef(1);
   const [rotation, setRotation] = useState(0);
   const [flipH, setFlipH] = useState(false);
   const [flipV, setFlipV] = useState(false);
@@ -412,9 +448,6 @@ function ImageResizer() {
   }
 
   const referenceBase = reference ? rotatedBase(reference) : null;
-  const referenceRatio = referenceBase
-    ? referenceBase.width / referenceBase.height
-    : 1;
 
   function targetFor(image) {
     const base = rotatedBase(image);
@@ -434,63 +467,68 @@ function ImageResizer() {
         return { width: base.width, height: base.height, fit: "fill" };
       }
 
-      return { width: selected.width, height: selected.height, fit: aspectFit };
+      return { width: selected.width, height: selected.height, fit: frameFit };
     }
 
     if (!sizeTouched) {
       return { width: base.width, height: base.height, fit: "fill" };
     }
 
-    const boxWidth = clampSide(width);
-    const boxHeight = clampSide(height);
+    // "By Size" always exports exactly width × height (e.g. 1620 × 2880).
+    // If a photo has a different shape, frameFit decides how it fills it.
+    const exactWidth = clampSide(width);
+    const exactHeight = clampSide(height);
+    const sameShape =
+      Math.abs(base.width / base.height - exactWidth / exactHeight) < 0.001;
 
-    if (lockAspect) {
-      // Fit inside the box without stretching. Each image keeps its own
-      // shape, so a batch of portrait and landscape photos stays correct.
-      const fit = Math.min(boxWidth / base.width, boxHeight / base.height);
+    return {
+      width: exactWidth,
+      height: exactHeight,
+      fit: sameShape ? "fill" : frameFit,
+    };
+  }
 
-      return {
-        width: clampSide(base.width * fit),
-        height: clampSide(base.height * fit),
-        fit: "fill",
-      };
-    }
-
-    return { width: boxWidth, height: boxHeight, fit: "fill" };
+  // Set both sides at once (presets, Original, rotate) and remember the ratio.
+  function setSize(nextWidth, nextHeight) {
+    const w = clampSide(nextWidth);
+    const h = clampSide(nextHeight);
+    setWidth(w);
+    setHeight(h);
+    lockRatioRef.current = w / h;
   }
 
   function updateWidth(value) {
     setSizeTouched(true);
-    setWidth(value);
 
-    if (lockAspect && referenceBase) {
-      setHeight(clampSide(value / referenceRatio));
+    if (lockAspect) {
+      setWidth(value);
+      setHeight(clampSide(value / lockRatioRef.current));
+    } else {
+      setSize(value, height);
     }
   }
 
   function updateHeight(value) {
     setSizeTouched(true);
-    setHeight(value);
 
-    if (lockAspect && referenceBase) {
-      setWidth(clampSide(value * referenceRatio));
+    if (lockAspect) {
+      setHeight(value);
+      setWidth(clampSide(value * lockRatioRef.current));
+    } else {
+      setSize(width, value);
     }
   }
 
   function toggleLock() {
-    const next = !lockAspect;
-    setLockAspect(next);
-
-    if (next && referenceBase) {
-      setHeight(clampSide(width / referenceRatio));
-    }
+    // Locking keeps the ratio of the numbers currently in the boxes.
+    lockRatioRef.current = clampSide(width) / clampSide(height);
+    setLockAspect((current) => !current);
   }
 
   // A 90° turn swaps the output sides too, otherwise the photo is squashed.
   function rotate(delta) {
     setRotation((current) => (current + delta + 360) % 360);
-    setWidth(height);
-    setHeight(width);
+    setSize(height, width);
   }
 
   async function addImages(fileList) {
@@ -570,8 +608,7 @@ function ImageResizer() {
     if (wasEmpty) {
       setSizeTouched(false);
       const base = rotatedBase(prepared[0]);
-      setWidth(clampSide(base.width));
-      setHeight(clampSide(base.height));
+      setSize(base.width, base.height);
       setScreen("editor");
     }
   }
@@ -612,7 +649,7 @@ function ImageResizer() {
     setMode("size");
     setPercent(100);
     setAspect("original");
-    setAspectFit("cover");
+    setFrameFit("cover");
     setRotation(0);
     setFlipH(false);
     setFlipV(false);
@@ -622,8 +659,7 @@ function ImageResizer() {
     setSizeTouched(false);
 
     if (reference) {
-      setWidth(clampSide(reference.width));
-      setHeight(clampSide(reference.height));
+      setSize(reference.width, reference.height);
     }
   }
 
@@ -889,7 +925,7 @@ function ImageResizer() {
             <div className="image-header-content">
               <span className="image-header-label">IMAGE TOOL</span>
               <h1>
-                Resize your <span>images.</span>
+                Resize your <span>images</span>
               </h1>
               <p>
                 Resize, scale, rotate, flip, and export JPG, PNG, or WebP.
@@ -1030,21 +1066,21 @@ function ImageResizer() {
                         checked={lockAspect}
                         onChange={toggleLock}
                       />
-                      Keep aspect ratio (no stretching)
+                      Lock ratio (changing one side updates the other)
                     </label>
 
-                    {!sizeTouched && (
+                    {!sizeTouched ? (
                       <p className="image-transform-note">
                         Each image keeps its original size. Type a size or pick
                         a preset to change it.
                       </p>
-                    )}
-
-                    {sizeTouched && lockAspect && images.length > 1 && (
-                      <p className="image-transform-note">
-                        Each image fits inside {width} × {height} and keeps its
-                        own shape.
-                      </p>
+                    ) : (
+                      <>
+                        <p className="image-transform-note">
+                          Every image is exported at exactly {width} × {height} px.
+                        </p>
+                        <FitChoice value={frameFit} onChange={setFrameFit} />
+                      </>
                     )}
 
                     <p className="image-mini-label">Quick presets</p>
@@ -1056,8 +1092,7 @@ function ImageResizer() {
                           setSizeTouched(false);
 
                           if (referenceBase) {
-                            setWidth(clampSide(referenceBase.width));
-                            setHeight(clampSide(referenceBase.height));
+                            setSize(referenceBase.width, referenceBase.height);
                           }
                         }}
                       >
@@ -1076,8 +1111,7 @@ function ImageResizer() {
                           }
                           onClick={() => {
                             setSizeTouched(true);
-                            setWidth(preset.width);
-                            setHeight(preset.height);
+                            setSize(preset.width, preset.height);
                           }}
                         >
                           {preset.label}
@@ -1127,25 +1161,7 @@ function ImageResizer() {
                     </div>
 
                     {aspect !== "original" && (
-                      <>
-                        <p className="image-mini-label">Fit</p>
-                        <div className="image-format-row">
-                          <button
-                            type="button"
-                            className={aspectFit === "cover" ? "active" : ""}
-                            onClick={() => setAspectFit("cover")}
-                          >
-                            Crop to fill
-                          </button>
-                          <button
-                            type="button"
-                            className={aspectFit === "contain" ? "active" : ""}
-                            onClick={() => setAspectFit("contain")}
-                          >
-                            Fit with bars
-                          </button>
-                        </div>
-                      </>
+                      <FitChoice value={frameFit} onChange={setFrameFit} />
                     )}
                   </div>
                 )}

@@ -14,10 +14,11 @@ const ASPECT_PRESETS = {
 // "Original" is the default: visually lossless (CRF 18), no bitrate cap,
 // no downscaling, high audio bitrate.
 const QUALITY_PRESETS = {
-  Original: { crf: "18", maxrate: "", bufsize: "", audio: "192k" },
-  High: { crf: "24", maxrate: "4000k", bufsize: "8000k", audio: "128k" },
-  Medium: { crf: "28", maxrate: "2200k", bufsize: "4400k", audio: "96k" },
-  Low: { crf: "33", maxrate: "1100k", bufsize: "2200k", audio: "96k" },
+  // vp8: settings for WEBM (VP8 constrained quality: lower crf = better).
+  Original: { crf: "18", maxrate: "", bufsize: "", audio: "192k", vp8: { crf: "6", cap: "20M" } },
+  High: { crf: "24", maxrate: "4000k", bufsize: "8000k", audio: "128k", vp8: { crf: "12", cap: "4000k" } },
+  Medium: { crf: "28", maxrate: "2200k", bufsize: "4400k", audio: "96k", vp8: { crf: "20", cap: "2200k" } },
+  Low: { crf: "33", maxrate: "1100k", bufsize: "2200k", audio: "96k", vp8: { crf: "30", cap: "1100k" } },
 };
 
 // Longest edge for the "Original" frame at each quality.
@@ -33,8 +34,9 @@ let coreUrlsPromise = null;
 let ffmpegPromise = null;
 let activeFFmpeg = null;
 
+// Video needs even sizes. Round down so we never upscale by a pixel.
 function even(value) {
-  return Math.max(2, Math.round(value / 2) * 2);
+  return Math.max(2, Math.floor(value / 2) * 2);
 }
 
 function clampZoom(scalePercent) {
@@ -307,7 +309,18 @@ export async function processVideo(videoItem, settings, onProgress, signal) {
 
   const handleAbort = () => resetFFmpeg(ffmpeg);
 
+  // Keep the last lines of ffmpeg's log so failures can be diagnosed.
+  const logTail = [];
+  const handleLog = ({ message }) => {
+    logTail.push(message);
+
+    if (logTail.length > 40) {
+      logTail.shift();
+    }
+  };
+
   ffmpeg.on("progress", handleProgress);
+  ffmpeg.on("log", handleLog);
   signal?.addEventListener("abort", handleAbort, { once: true });
 
   const inputName = `input-${makeId()}.${inputExtension(videoItem)}`;
@@ -335,20 +348,24 @@ export async function processVideo(videoItem, settings, onProgress, signal) {
     );
 
     if (target.format === "webm") {
+      // VP8, not VP9: libvpx-vp9 crashes ("memory access out of bounds")
+      // in @ffmpeg/core 0.12.x for every setting we tested. VP8 works and
+      // plays in all browsers that play WEBM.
       args.push(
         "-c:v",
-        "libvpx-vp9",
-        "-b:v",
-        // "0" = pure constant quality (no bitrate ceiling)
-        preset.maxrate || "0",
+        "libvpx",
         "-crf",
-        preset.crf,
+        preset.vp8.crf,
+        "-b:v",
+        preset.vp8.cap,
+        "-qmin",
+        "0",
         "-deadline",
-        "realtime",
+        "good",
         "-cpu-used",
-        "8",
-        "-row-mt",
-        "1"
+        "4",
+        "-auto-alt-ref",
+        "0"
       );
     } else {
       // No fixed "-level": x264 picks the right one for the frame size.
@@ -421,8 +438,9 @@ export async function processVideo(videoItem, settings, onProgress, signal) {
     }
 
     const message = String(error?.message || error || "");
+    console.error("FFmpeg failed:", message, "\n" + logTail.join("\n"));
 
-    if (/out of memory|memory access out of bounds|OOM|Aborted\(/i.test(message)) {
+    if (/out of memory|memory access out of bounds|Cannot enlarge memory/i.test(message)) {
       throw new Error(
         "This video is too large to process in the browser. Try a shorter or smaller file."
       );
@@ -436,6 +454,7 @@ export async function processVideo(videoItem, settings, onProgress, signal) {
 
     try {
       ffmpeg.off("progress", handleProgress);
+      ffmpeg.off("log", handleLog);
     } catch {
       // Already terminated.
     }
